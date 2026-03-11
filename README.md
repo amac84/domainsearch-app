@@ -1,36 +1,89 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+## Domainsearch Naming Lab
+
+AI-powered brand name generator with live domain availability checks and iterative refinement.
 
 ## Getting Started
 
-First, run the development server:
+1. Install dependencies:
+
+```bash
+npm install
+```
+
+2. Create local environment file in `domainsearch-app`:
+
+```bash
+cd domainsearch-app
+cp .env.example .env
+# or: copy .env.example .env   (Windows)
+```
+
+3. Edit `domainsearch-app/.env` and set `OPENAI_API_KEY` to your real API key from [platform.openai.com/api-keys](https://platform.openai.com/account/api-keys). Use the full key (starts with `sk-...`); do not leave a placeholder like `your_openai_key_here`. No quotes or spaces around `=`.
+
+4. Run the dev server (from repo root or from `domainsearch-app`):
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Next.js loads `.env` from the `domainsearch-app` folder. If you run from the repo root, the script changes into `domainsearch-app` first so the correct `.env` is used. Restart the dev server after changing `.env`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Open `http://localhost:3000`.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## API
 
-## Learn More
+### `POST /api/generate`
 
-To learn more about Next.js, take a look at the following resources:
+Request body:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```json
+{
+  "description": "AI finance copilot for freelancers",
+  "industry": "fintech",
+  "tone": "premium",
+  "maxLength": 10,
+  "maxSyllables": 3,
+  "avoidDictionaryWords": true,
+  "avoidWords": ["mint", "ledger"],
+  "tlds": ["com", "io", "co"],
+  "temperature": 0.7,
+  "count": 100,
+  "includePrefixVariants": false
+}
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Response:
 
-## Deploy on Vercel
+```json
+{
+  "names": [
+    {
+      "base": "zorvia",
+      "domains": [
+        { "domain": "zorvia.com", "available": true, "status": "available", "source": "api" }
+      ],
+      "score": 115
+    }
+  ],
+  "meta": {
+    "generatedCount": 100,
+    "checkedDomains": 300,
+    "availabilityRate": 0.17,
+    "refined": false
+  }
+}
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Notes
+
+- Domain checks are cached in memory with TTL (`DOMAIN_CHECK_CACHE_TTL_SECONDS`).
+- The domain check endpoint path is configurable with `AGENT_DOMAIN_SERVICE_CHECK_PATH` and supports query style (`/api/check`) or path placeholders (`/api/lookup/{base}`, `/api/lookup/{domain}`).
+- **GoDaddy pricing:** Availability always comes from your domain service (`AGENT_DOMAIN_SERVICE_URL`). To show dollar amounts, this app can use GoDaddy in either of two ways:
+  - **Option A – Standard API** ([developer.godaddy.com/doc](https://developer.godaddy.com/doc)): Set `GODADDY_API_KEY` and `GODADDY_API_SECRET` in `.env`. The app calls the [Domain Availability API](https://developer.godaddy.com/doc/endpoint/domains#/availability/available) for each domain your service marks as **available** and merges in the price (and treats price ≥ $20 as premium). Use `GODADDY_OTE=1` for the OTE (sandbox) API. **403 Forbidden** usually means the API requires a GoDaddy account with **50+ domains** or an API/Reseller plan—see [developer.godaddy.com/getstarted](https://developer.godaddy.com/getstarted).
+  - **Option B – GoDaddy MCP Server** ([developer.godaddy.com/mcp](https://developer.godaddy.com/mcp)): Public **Domain Search** and **Availability Check** with **no authentication**. Rate limited and read-only; useful if you don’t have API keys or hit 403. This app does not yet call the MCP endpoint (it uses the standard API when keys are set); MCP integration would require implementing the [StreamableHTTP](https://developer.godaddy.com/mcp) transport.
+- Server logs are written to `domainsearch-app/logs/app.log` (JSON lines).
+- Set `LOG_TO_CONSOLE=1` if you also want logs echoed to the terminal.
+- Override the log file location with `LOG_FILE_PATH=/absolute/path/to/file.log`.
+- Refinement can be triggered from the UI with “Refine Based on Available”.
+
