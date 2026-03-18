@@ -30,6 +30,24 @@ Next.js loads `.env` from the `domainsearch-app` folder. If you run from the rep
 
 Open `http://localhost:3000`.
 
+## Simple Email Gate (No Login)
+
+Use this for lightweight access control when sharing the app with a friend.
+
+1. Add an allowlist to `domainsearch-app/.env`:
+
+```bash
+EMAIL_GATE_ALLOWED=you@example.com,friend@example.com
+```
+
+2. Restart the app.
+3. Anyone opening the app will be sent to `/gate` and must enter an allowlisted email.
+4. On success, the app sets an access cookie and allows normal app/API use.
+
+Notes:
+- This is intentionally simple and not a full authentication system.
+- If `EMAIL_GATE_ALLOWED` is empty or missing, the gate is disabled.
+
 ## API
 
 ### `POST /api/generate`
@@ -79,9 +97,7 @@ Response:
 
 - Domain checks are cached in memory with TTL (`DOMAIN_CHECK_CACHE_TTL_SECONDS`).
 - The domain check endpoint path is configurable with `AGENT_DOMAIN_SERVICE_CHECK_PATH` and supports query style (`/api/check`) or path placeholders (`/api/lookup/{base}`, `/api/lookup/{domain}`).
-- **GoDaddy pricing:** Availability always comes from your domain service (`AGENT_DOMAIN_SERVICE_URL`). To show dollar amounts, this app can use GoDaddy in either of two ways:
-  - **Option A – Standard API** ([developer.godaddy.com/doc](https://developer.godaddy.com/doc)): Set `GODADDY_API_KEY` and `GODADDY_API_SECRET` in `.env`. The app calls the [Domain Availability API](https://developer.godaddy.com/doc/endpoint/domains#/availability/available) for each domain your service marks as **available** and merges in the price (and treats price ≥ $20 as premium). Use `GODADDY_OTE=1` for the OTE (sandbox) API. **403 Forbidden** usually means the API requires a GoDaddy account with **50+ domains** or an API/Reseller plan—see [developer.godaddy.com/getstarted](https://developer.godaddy.com/getstarted).
-  - **Option B – GoDaddy MCP Server** ([developer.godaddy.com/mcp](https://developer.godaddy.com/mcp)): Public **Domain Search** and **Availability Check** with **no authentication**. Rate limited and read-only; useful if you don’t have API keys or hit 403. This app does not yet call the MCP endpoint (it uses the standard API when keys are set); MCP integration would require implementing the [StreamableHTTP](https://developer.godaddy.com/mcp) transport.
+- Availability and pricing are sourced only from your configured domain service (`AGENT_DOMAIN_SERVICE_URL`).
 - Server logs are written to `domainsearch-app/logs/app.log` (JSON lines).
 - Set `LOG_TO_CONSOLE=1` if you also want logs echoed to the terminal.
 - Override the log file location with `LOG_FILE_PATH=/absolute/path/to/file.log`.

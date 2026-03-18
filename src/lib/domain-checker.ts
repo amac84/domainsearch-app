@@ -1,5 +1,5 @@
 import type { DomainResult } from "@/types";
-import { logError, logInfo, logWarn } from "@/lib/server-logger";
+import { logError, logWarn } from "@/lib/server-logger";
 
 interface CachedResult {
   value: DomainResult;
@@ -153,117 +153,6 @@ function mapApiResponseToDomainResult(domain: string, payload: unknown): DomainR
   };
 }
 
-function isGoDaddyConfigured(): boolean {
-  const key = process.env.GODADDY_API_KEY ?? process.env.GODADDY_KEY;
-  const secret = process.env.GODADDY_API_SECRET ?? process.env.GODADDY_SECRET;
-  return Boolean(key?.trim() && secret?.trim());
-}
-
-/** GoDaddy availability response: price in currency-micro-unit (1/1,000,000 USD). */
-interface GoDaddyAvailableResponse {
-  domain: string;
-  available: boolean;
-  definitive: boolean;
-  currency?: string;
-  period?: number;
-  price?: number;
-}
-
-/** Threshold (USD) above which we treat a domain as premium when we only have price from GoDaddy. */
-const PREMIUM_PRICE_THRESHOLD_USD = 20;
-
-/** Fetch price (USD) for one domain from GoDaddy. Used to enrich available names with pricing. */
-async function fetchGoDaddyPrice(
-  domain: string,
-  opts?: { forbidLogRef?: { logged: boolean; count: number } },
-): Promise<number | undefined> {
-  const key = process.env.GODADDY_API_KEY ?? process.env.GODADDY_KEY;
-  const secret = process.env.GODADDY_API_SECRET ?? process.env.GODADDY_SECRET;
-  const baseUrl =
-    process.env.GODADDY_OTE === "1" || process.env.GODADDY_OTE === "true"
-      ? "https://api.ote-godaddy.com"
-      : "https://api.godaddy.com";
-  const auth = `sso-key ${key!.trim()}:${secret!.trim()}`;
-  const url = `${baseUrl}/v1/domains/available?domain=${encodeURIComponent(domain)}&checkType=FULL`;
-  try {
-    const response = await fetch(url, {
-      cache: "no-store",
-      headers: { Authorization: auth, Accept: "application/json" },
-    });
-    if (!response.ok) {
-      if (response.status === 429) {
-        await sleep(2000);
-        const retry = await fetch(url, {
-          cache: "no-store",
-          headers: { Authorization: auth, Accept: "application/json" },
-        });
-        if (!retry.ok) return undefined;
-        const retryJson = (await retry.json()) as GoDaddyAvailableResponse;
-        const micro = typeof retryJson.price === "number" && Number.isFinite(retryJson.price) ? retryJson.price : undefined;
-        return micro != null ? micro / 1_000_000 : undefined;
-      }
-      if (response.status === 403) {
-        if (opts?.forbidLogRef) {
-          opts.forbidLogRef.count += 1;
-          if (!opts.forbidLogRef.logged) {
-            opts.forbidLogRef.logged = true;
-            logWarn("domain_check.godaddy.forbidden", {
-              domain,
-              hint: "GoDaddy Domain Availability API may require 50+ domains or an API/Reseller plan. See https://developer.godaddy.com/getstarted",
-            });
-          }
-        } else {
-          logWarn("domain_check.godaddy.forbidden", {
-            domain,
-            hint: "GoDaddy Domain Availability API may require 50+ domains or an API/Reseller plan. See https://developer.godaddy.com/getstarted",
-          });
-        }
-      } else {
-        logWarn("domain_check.godaddy.non_ok", { domain, status: response.status });
-      }
-      return undefined;
-    }
-    const json = (await response.json()) as GoDaddyAvailableResponse;
-    const priceMicro = typeof json.price === "number" && Number.isFinite(json.price) ? json.price : undefined;
-    return priceMicro != null ? priceMicro / 1_000_000 : undefined;
-  } catch (error) {
-    logError("domain_check.godaddy.request_failed", error, { domain });
-    return undefined;
-  }
-}
-
-/** Enrich available domains (from agent service) with GoDaddy price. Updates byDomain and cache in place. */
-async function enrichAvailableWithGoDaddyPrice(
-  byDomain: Map<string, DomainResult>,
-  ttlSeconds: number,
-): Promise<void> {
-  const needingPrice = Array.from(byDomain.entries()).filter(
-    ([_, r]) => r.available && (r.price == null || !Number.isFinite(r.price)),
-  );
-  if (needingPrice.length === 0) return;
-  logInfo("domain_check.godaddy.enrich_start", { count: needingPrice.length });
-  const forbidLogRef = { logged: false, count: 0 };
-  for (const [domain, result] of needingPrice) {
-    const priceUsd = await fetchGoDaddyPrice(domain, { forbidLogRef });
-    if (priceUsd != null && Number.isFinite(priceUsd)) {
-      const enriched: DomainResult = {
-        ...result,
-        price: priceUsd,
-        premium: result.premium || priceUsd >= PREMIUM_PRICE_THRESHOLD_USD,
-      };
-      byDomain.set(domain, enriched);
-      setCached(domain, enriched, ttlSeconds);
-    }
-    await sleep(1100);
-  }
-  if (forbidLogRef.count > 0) {
-    logWarn("domain_check.godaddy.forbidden_summary", {
-      count: forbidLogRef.count,
-      hint: "GoDaddy Domain Availability API may require 50+ domains or an API/Reseller plan. See https://developer.godaddy.com/getstarted",
-    });
-  }
-}
-
 export async function checkDomains(
   domains: string[],
   options: CheckDomainsOptions,
@@ -349,10 +238,6 @@ export async function checkDomains(
     );
     // Return results instead of throwing so names still appear with error badges;
     // user can fix URL/path and retry.
-  }
-
-  if (isGoDaddyConfigured()) {
-    await enrichAvailableWithGoDaddyPrice(byDomain, ttlSeconds);
   }
 
   return byDomain;

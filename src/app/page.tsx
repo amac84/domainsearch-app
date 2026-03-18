@@ -4,6 +4,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { addSavedName, addSavedNames, getSavedNames, removeSavedName } from "@/lib/saved-storage";
 import type { GenerateResponseBody, NameCandidate, NameRecommendation, RefinementInputName, SavedName } from "@/types";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Slider } from "@/components/ui/slider";
+import { Badge } from "@/components/ui/badge";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Copy, ChevronDown, Save, Square, Sparkles, Trash2 } from "lucide-react";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 interface FormState {
   description: string;
@@ -100,6 +122,7 @@ export default function Home(): React.JSX.Element {
   const [savedNames, setSavedNames] = useState<SavedName[]>([]);
   const [savedSearch, setSavedSearch] = useState("");
   const [selectedSavedId, setSelectedSavedId] = useState<string | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const activityLogRef = useRef<HTMLDivElement | null>(null);
 
@@ -303,40 +326,46 @@ export default function Home(): React.JSX.Element {
   };
 
   return (
-    <div className="flex min-h-screen w-full bg-[var(--background)]">
+    <div className="flex min-h-screen w-full bg-background">
       {/* Left nav: saved names + search */}
-      <aside className="flex w-64 shrink-0 flex-col border-r border-[var(--card-border)] bg-[var(--card)]">
-        <div className="sticky top-0 border-b border-[var(--card-border)] p-3">
-          <h2 className="text-sm font-semibold text-[var(--foreground)]">Saved names</h2>
-          <input
+      <aside className="flex w-64 shrink-0 flex-col border-r border-border bg-card/50">
+        <div className="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur-sm px-4 py-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                <Sparkles className="size-4" />
+              </div>
+              <span className="font-semibold text-foreground">Naming Lab</span>
+            </div>
+            <ThemeToggle />
+          </div>
+          <p className="mt-3 text-xs text-muted-foreground">Saved names</p>
+          <Input
             type="search"
             value={savedSearch}
             onChange={(e) => setSavedSearch(e.target.value)}
             placeholder="Search saved…"
-            className="mt-2 w-full rounded-md border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted)] outline-none focus:border-[var(--primary)]"
+            className="mt-2"
             aria-label="Search saved names"
           />
         </div>
         <nav className="flex-1 overflow-y-auto p-2">
           {filteredSaved.length === 0 ? (
-            <p className="py-4 text-center text-sm text-[var(--muted)]">
+            <p className="py-8 text-center text-sm text-muted-foreground">
               {savedSearch.trim() ? "No matches." : "No saved names yet. Save from results."}
             </p>
           ) : (
             <ul className="space-y-0.5">
               {filteredSaved.map((s) => (
                 <li key={s.id}>
-                  <button
+                  <Button
                     type="button"
+                    variant={selectedSavedId === s.id ? "default" : "ghost"}
+                    className="w-full justify-start font-mono"
                     onClick={() => setSelectedSavedId(s.id)}
-                    className={`w-full rounded-md px-2 py-1.5 text-left text-sm font-mono transition-colors ${
-                      selectedSavedId === s.id
-                        ? "bg-[var(--primary)] text-[var(--primary-foreground)]"
-                        : "text-[var(--foreground)] hover:bg-[var(--background)]"
-                    }`}
                   >
                     {s.base}
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
@@ -344,126 +373,206 @@ export default function Home(): React.JSX.Element {
         </nav>
       </aside>
 
-      <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-1 flex-col gap-8 px-6 py-8 bg-[var(--background)]">
+      <main className="flex min-w-0 flex-1 flex-col">
+        {/* Hero strip */}
+        <div className="border-b border-border/60 bg-gradient-to-b from-muted/40 to-transparent px-6 py-10 md:py-14">
+          <div className="mx-auto max-w-3xl text-center">
+            <h1 className="text-3xl font-bold tracking-tight text-foreground md:text-4xl">
+              AI-powered brand names
+            </h1>
+            <p className="mt-2 text-muted-foreground md:text-lg">
+              Describe your product. Get domain-ready names and live availability in one go.
+            </p>
+          </div>
+        </div>
+
+        <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-8 px-6 py-8">
       {/* Selected saved name detail */}
       {selectedSaved ? (
-        <section className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-6 shadow-sm">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0 flex-1">
-              <h2 className="text-lg font-semibold text-[var(--foreground)]">Saved: {selectedSaved.base}</h2>
+        <Card>
+          <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0 pb-2">
+            <div className="min-w-0 flex-1 space-y-1">
+              <CardTitle>Saved: {selectedSaved.base}</CardTitle>
               {selectedSaved.summaryConclusion ? (
-                <div className="mt-3 rounded-lg border border-[var(--card-border)] bg-[var(--background)] p-3">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">Summary conclusion (from run)</h3>
-                  <p className="mt-1 text-sm text-[var(--muted)]">{selectedSaved.summaryConclusion}</p>
+                <div className="mt-3 rounded-lg border border-border bg-muted/50 p-3">
+                  <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Summary conclusion (from run)</p>
+                  <p className="mt-1 text-sm text-muted-foreground">{selectedSaved.summaryConclusion}</p>
                 </div>
               ) : null}
               {selectedSaved.recommendationReason ? (
-                <p className="mt-2 text-sm text-[var(--foreground)]">{selectedSaved.recommendationReason}</p>
+                <p className="text-sm text-foreground">{selectedSaved.recommendationReason}</p>
               ) : null}
               {selectedSaved.rationale ? (
-                <p className="mt-1 text-sm text-[var(--muted)]">{selectedSaved.rationale}</p>
+                <p className="text-sm text-muted-foreground">{selectedSaved.rationale}</p>
               ) : null}
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {selectedSaved.domains.map((d) => {
                   const isPremium = Boolean(d.premium);
-                  const chipClass = d.available
+                  const variant = d.available
                     ? isPremium
-                      ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
-                      : "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300"
-                    : "bg-[var(--background)] text-[var(--muted)]";
+                      ? "secondary"
+                      : "default"
+                    : "outline";
                   return (
-                    <span
-                      key={d.domain}
-                      className={`inline-flex rounded px-2 py-0.5 font-mono text-xs ${chipClass}`}
-                    >
+                    <Badge key={d.domain} variant={variant} className="font-mono">
                       {d.domain}
                       {d.available && isPremium ? " (premium)" : ""}
                       {!d.available ? " (taken)" : ""}
-                    </span>
+                    </Badge>
                   );
                 })}
               </div>
-              <p className="mt-2 text-xs text-[var(--muted)]">Score: {selectedSaved.score} · Saved {new Date(selectedSaved.savedAt).toLocaleString()}</p>
+              <p className="text-xs text-muted-foreground">Score: {selectedSaved.score} · Saved {new Date(selectedSaved.savedAt).toLocaleString()}</p>
             </div>
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="icon"
               onClick={() => handleRemoveSaved(selectedSaved.id)}
-              className="shrink-0 rounded p-2 text-[var(--muted)] hover:bg-[var(--background)] hover:text-red-600"
+              className="shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
               title="Remove from saved"
               aria-label="Remove from saved"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-            </button>
-          </div>
-        </section>
+              <Trash2 className="size-4" />
+            </Button>
+          </CardHeader>
+        </Card>
       ) : null}
 
-      <section className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-6 shadow-sm">
-        <h1 className="text-2xl font-semibold text-[var(--foreground)]">AI-Powered Brand Name Generator</h1>
-        <p className="mt-2 text-sm text-[var(--muted)]">
-          Generate domain-ready names, check live availability, and refine toward
-          higher hit rates.
-        </p>
-
-        <div className="mt-6 grid gap-4 md:grid-cols-2">
-          <label className="md:col-span-2">
-            <span className="mb-1 block text-sm font-medium text-[var(--foreground)]">Brand Description</span>
-            <textarea
+      <Card className="overflow-hidden border-0 shadow-lg shadow-black/5 dark:shadow-none dark:ring-1 dark:ring-border">
+        <CardContent className="p-0">
+          {/* Primary focus: one prompt + tone + actions */}
+          <div className="p-6 md:p-8">
+            <Label htmlFor="description" className="text-muted-foreground text-sm">
+              What are you building?
+            </Label>
+            <Textarea
+              id="description"
               value={form.description}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, description: event.target.value }))
+              onChange={(e) =>
+                setForm((prev) => ({ ...prev, description: e.target.value }))
               }
               rows={4}
-              placeholder="Describe your product, audience, and vibe..."
-              className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] placeholder:text-[var(--muted)] outline-none focus:border-[var(--primary)] focus:ring-1 focus:ring-[var(--primary)]"
+              placeholder="e.g. A calm, premium app for tracking habits. Audience: busy professionals who want simplicity."
+              className="mt-2 min-h-[120px] resize-y border-0 bg-muted/40 text-base placeholder:text-muted-foreground focus-visible:ring-2 md:min-h-[100px]"
             />
-          </label>
+            <div className="mt-6 flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-muted-foreground">Tone:</span>
+                <Select
+                  value={form.tone}
+                  onValueChange={(value) =>
+                    setForm((prev) => ({ ...prev, tone: value ?? prev.tone }))
+                  }
+                >
+                  <SelectTrigger className="w-[140px]">
+                    <SelectValue placeholder="Tone" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="bold">Bold</SelectItem>
+                    <SelectItem value="technical">Technical</SelectItem>
+                    <SelectItem value="playful">Playful</SelectItem>
+                    <SelectItem value="premium">Premium</SelectItem>
+                    <SelectItem value="professional">Professional</SelectItem>
+                    <SelectItem value="modern">Modern</SelectItem>
+                    <SelectItem value="minimal">Minimal</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button
+                size="lg"
+                onClick={() => (loading && !isRefining ? stopGenerating() : submit(false))}
+                disabled={!loading && (!form.description.trim() || form.tlds.length === 0)}
+                className="gap-2"
+              >
+                {loading && !isRefining ? (
+                  <>
+                    <Square className="size-4" />
+                    Stop
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="size-4" />
+                    Generate names
+                  </>
+                )}
+              </Button>
+              <Button
+                size="lg"
+                variant="outline"
+                onClick={() => (loading && isRefining ? stopGenerating() : submit(true))}
+                disabled={!loading && results.length === 0}
+                className="gap-2"
+              >
+                {loading && isRefining ? (
+                  <>
+                    <Square className="size-4" />
+                    Stop
+                  </>
+                ) : (
+                  "Refine from results"
+                )}
+              </Button>
+            </div>
+          </div>
 
-          <label>
-            <span className="mb-1 block text-sm font-medium text-[var(--foreground)]">Industry (optional)</span>
-            <input
+          {loading ? (
+            <div className="border-t border-border px-6 py-4">
+              <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">Activity</p>
+              <div
+                ref={activityLogRef}
+                className="activity-log max-h-40 overflow-y-auto overflow-x-hidden font-mono text-sm"
+              >
+                {progressLog.length === 0 ? (
+                  <div className="py-0.5 text-muted-foreground">Preparing…</div>
+                ) : (
+                  progressLog.map((msg, i) => (
+                    <div key={i} className="py-0.5">
+                      {msg}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          ) : null}
+
+          {/* Advanced options: collapsible */}
+          <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="border-t border-border">
+            <CollapsibleTrigger className="flex w-full items-center justify-between px-6 py-4 text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground">
+              <span>Advanced options</span>
+              <ChevronDown className={`size-4 shrink-0 transition-transform duration-200 ${advancedOpen ? "rotate-180" : ""}`} />
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <div className="space-y-6 border-t border-border bg-muted/20 px-6 py-6">
+        <div className="grid gap-6 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="industry">Industry (optional)</Label>
+            <Input
+              id="industry"
               value={form.industry}
               onChange={(event) =>
                 setForm((prev) => ({ ...prev, industry: event.target.value }))
               }
-              className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] placeholder:text-[var(--muted)] outline-none focus:border-[var(--primary)] focus:ring-1 focus:ring-[var(--primary)]"
+              placeholder="e.g. SaaS, fintech"
             />
-          </label>
+          </div>
 
-          <label>
-            <span className="mb-1 block text-sm font-medium text-[var(--foreground)]">Reference domain (optional)</span>
-            <input
+          <div className="space-y-2">
+            <Label htmlFor="referenceDomain">Reference domain (optional)</Label>
+            <Input
+              id="referenceDomain"
               value={form.referenceDomain}
               onChange={(event) =>
                 setForm((prev) => ({ ...prev, referenceDomain: event.target.value }))
               }
               placeholder="example.com"
-              className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] placeholder:text-[var(--muted)] outline-none focus:border-[var(--primary)] focus:ring-1 focus:ring-[var(--primary)]"
             />
-          </label>
+          </div>
 
-          <label>
-            <span className="mb-1 block text-sm font-medium text-[var(--foreground)]">Tone</span>
-            <select
-              value={form.tone}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, tone: event.target.value }))
-              }
-              className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] outline-none focus:border-[var(--primary)] focus:ring-1 focus:ring-[var(--primary)]"
-            >
-              <option value="bold">bold</option>
-              <option value="technical">technical</option>
-              <option value="playful">playful</option>
-              <option value="premium">premium</option>
-              <option value="professional">professional</option>
-              <option value="modern">modern</option>
-              <option value="minimal">minimal</option>
-            </select>
-          </label>
-
-          <label>
-            <span className="mb-1 block text-sm font-medium text-[var(--foreground)]">Max length</span>
-            <input
+          <div className="space-y-2">
+            <Label htmlFor="maxLength">Max length</Label>
+            <Input
+              id="maxLength"
               type="number"
               min={4}
               max={20}
@@ -474,13 +583,13 @@ export default function Home(): React.JSX.Element {
                   maxLength: Number(event.target.value),
                 }))
               }
-              className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] outline-none focus:border-[var(--primary)] focus:ring-1 focus:ring-[var(--primary)]"
             />
-          </label>
+          </div>
 
-          <label>
-            <span className="mb-1 block text-sm font-medium text-[var(--foreground)]">Max syllables</span>
-            <input
+          <div className="space-y-2">
+            <Label htmlFor="maxSyllables">Max syllables</Label>
+            <Input
+              id="maxSyllables"
               type="number"
               min={1}
               max={6}
@@ -491,13 +600,13 @@ export default function Home(): React.JSX.Element {
                   maxSyllables: Number(event.target.value),
                 }))
               }
-              className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] outline-none focus:border-[var(--primary)] focus:ring-1 focus:ring-[var(--primary)]"
             />
-          </label>
+          </div>
 
-          <label>
-            <span className="mb-1 block text-sm font-medium text-[var(--foreground)]">Names per batch</span>
-            <input
+          <div className="space-y-2">
+            <Label htmlFor="count">Names per batch</Label>
+            <Input
+              id="count"
               type="number"
               min={50}
               max={200}
@@ -508,208 +617,147 @@ export default function Home(): React.JSX.Element {
                   count: Number(event.target.value),
                 }))
               }
-              className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] outline-none focus:border-[var(--primary)] focus:ring-1 focus:ring-[var(--primary)]"
             />
-          </label>
+          </div>
 
-          <label className="md:col-span-2">
-            <span className="mb-1 block text-sm font-medium text-[var(--foreground)]">
-              Avoid words (comma-separated)
-            </span>
-            <input
+          <div className="space-y-2 md:col-span-2">
+            <Label htmlFor="avoidWords">Avoid words (comma-separated)</Label>
+            <Input
+              id="avoidWords"
               value={form.avoidWords}
               onChange={(event) =>
                 setForm((prev) => ({ ...prev, avoidWords: event.target.value }))
               }
               placeholder="cloud, open, data"
-              className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] placeholder:text-[var(--muted)] outline-none focus:border-[var(--primary)] focus:ring-1 focus:ring-[var(--primary)]"
             />
-          </label>
+          </div>
         </div>
 
-        <div className="mt-6 grid gap-4 md:grid-cols-2">
-          <div>
-            <p className="mb-2 text-sm font-medium text-[var(--foreground)]">Temperature: {form.temperature}</p>
-            <input
-              type="range"
+        <div className="grid gap-6 md:grid-cols-2">
+          <div className="space-y-3">
+            <Label>Temperature: {form.temperature}</Label>
+            <Slider
               min={0.3}
               max={1.2}
               step={0.05}
-              value={form.temperature}
-              onChange={(event) =>
+              value={[form.temperature]}
+              onValueChange={(values) => {
+                const v = Array.isArray(values) ? values[0] : values;
                 setForm((prev) => ({
                   ...prev,
-                  temperature: Number(event.target.value),
-                }))
-              }
-              className="w-full accent-[var(--primary)]"
+                  temperature: typeof v === "number" ? v : prev.temperature,
+                }));
+              }}
             />
           </div>
 
-          <div>
-            <p className="mb-2 text-sm font-medium text-[var(--foreground)]">TLDs</p>
-            <div className="flex gap-4">
+          <div className="space-y-3">
+            <Label>TLDs</Label>
+            <div className="flex flex-wrap gap-4">
               {["com", "ai", "io", "co"].map((tld) => (
-                <label key={tld} className="flex items-center gap-2 text-sm text-[var(--foreground)]">
-                  <input
-                    type="checkbox"
+                <label key={tld} className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                  <Checkbox
                     checked={form.tlds.includes(tld)}
-                    onChange={(event) => onTldToggle(tld, event.target.checked)}
-                    className="accent-[var(--primary)]"
+                    onCheckedChange={(checked) => onTldToggle(tld, checked === true)}
                   />
                   .{tld}
                 </label>
               ))}
             </div>
-            <p className="mt-1 text-xs text-[var(--muted)]">Show names that have at least one of these available. Option below to require all.</p>
+            <p className="text-xs text-muted-foreground">At least one of these available.</p>
           </div>
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center gap-4">
-          <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
-            <input
-              type="checkbox"
+        <div className="flex flex-wrap items-center gap-6">
+          <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+            <Checkbox
               checked={form.requireAllTlds}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, requireAllTlds: event.target.checked }))
+              onCheckedChange={(checked) =>
+                setForm((prev) => ({ ...prev, requireAllTlds: checked === true }))
               }
-              className="accent-[var(--primary)]"
             />
-            Require all selected TLDs (only show names where every selected TLD is available)
+            Require all selected TLDs
           </label>
-          <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
-            <input
-              type="checkbox"
+          <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+            <Checkbox
               checked={form.avoidDictionaryWords}
-              onChange={(event) =>
+              onCheckedChange={(checked) =>
                 setForm((prev) => ({
                   ...prev,
-                  avoidDictionaryWords: event.target.checked,
+                  avoidDictionaryWords: checked === true,
                 }))
               }
-              className="accent-[var(--primary)]"
             />
             Avoid dictionary words
           </label>
-          <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
-            <input
-              type="checkbox"
+          <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+            <Checkbox
               checked={form.includePrefixVariants}
-              onChange={(event) =>
+              onCheckedChange={(checked) =>
                 setForm((prev) => ({
                   ...prev,
-                  includePrefixVariants: event.target.checked,
+                  includePrefixVariants: checked === true,
                 }))
               }
-              className="accent-[var(--primary)]"
             />
             Include get/try prefix variants
           </label>
-          <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+          <label className="flex items-center gap-2 text-sm font-medium">
             <span>Min .com/.ai target:</span>
-            <input
+            <Input
               type="number"
               min={0}
               max={50}
+              className="w-20"
               value={form.minPremiumTarget}
               onChange={(e) =>
                 setForm((prev) => ({ ...prev, minPremiumTarget: Number(e.target.value) || 0 }))
               }
-              className="w-16 rounded-md border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 text-[var(--foreground)]"
             />
-            <span className="text-[var(--muted)]">(0 = off, keep generating until this many have .com or .ai)</span>
+            <span className="text-muted-foreground text-xs">(0 = off)</span>
           </label>
         </div>
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
 
-        <div className="mt-6 flex flex-wrap gap-3">
-          <button
-            type="button"
-            onClick={() => (loading && !isRefining ? stopGenerating() : submit(false))}
-            disabled={!loading && (!form.description.trim() || form.tlds.length === 0)}
-            className="inline-flex items-center gap-2 rounded-lg bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[var(--primary-foreground)] shadow-sm hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {loading && !isRefining ? (
-              <>
-                <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                  <rect x="6" y="6" width="12" height="12" rx="1" />
-                </svg>
-                Stop
-              </>
-            ) : (
-              "Generate"
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={() => (loading && isRefining ? stopGenerating() : submit(true))}
-            disabled={!loading && (results.length === 0)}
-            className="inline-flex items-center gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--card)] px-4 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {loading && isRefining ? (
-              <>
-                <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                  <rect x="6" y="6" width="12" height="12" rx="1" />
-                </svg>
-                Stop
-              </>
-            ) : (
-              "Refine Based on Available"
-            )}
-          </button>
-        </div>
-        {loading ? (
-          <div className="mt-4 rounded-lg border border-[var(--card-border)] bg-[var(--background)] p-3">
-            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Activity</p>
-            <div
-              ref={activityLogRef}
-              className="activity-log max-h-40 overflow-y-auto overflow-x-hidden font-mono text-sm text-[var(--foreground)]"
-            >
-              {progressLog.length === 0 ? (
-                <div className="py-0.5 text-[var(--muted)]">Preparing…</div>
-              ) : (
-                progressLog.map((msg, i) => (
-                  <div key={i} className="py-0.5">
-                    {msg}
-                  </div>
-                ))
-              )}
+          {error ? (
+            <div className="border-t border-border px-6 py-4">
+              <p className="text-sm text-destructive">{error}</p>
             </div>
-          </div>
-        ) : null}
-        {error ? <p className="mt-4 text-sm text-red-600">{error}</p> : null}
-      </section>
+          ) : null}
+        </CardContent>
+      </Card>
 
-      <section className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-6 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-lg font-semibold text-[var(--foreground)]">Results</h2>
+      <Card>
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-4 space-y-0">
+          <CardTitle>Results</CardTitle>
           <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm text-[var(--muted)]">
+            <p className="text-sm text-muted-foreground">
               {meta
                 ? `${meta.generatedCount} names, ${availableCount} available domains${meta.comAvailableCount != null ? `, ${meta.comAvailableCount} with .com` : ""}${meta.aiAvailableCount != null ? `, ${meta.aiAvailableCount} with .ai` : ""}${meta.premiumAvailableCount != null ? `, ${meta.premiumAvailableCount} with .com/.ai` : ""}${meta.refinementRounds != null && meta.refinementRounds > 0 ? ` (${meta.refinementRounds} refinement round${meta.refinementRounds === 1 ? "" : "s"})` : ""}, ${(meta.availabilityRate * 100).toFixed(1)}% hit rate`
                 : "No results yet"}
             </p>
             {results.length > 0 ? (
-              <button
-                type="button"
-                onClick={handleSaveAll}
-                className="shrink-0 rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-1.5 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--card-border)]"
-              >
+              <Button variant="outline" size="sm" onClick={handleSaveAll}>
+                <Save className="size-4" />
                 Save all
-              </button>
+              </Button>
             ) : null}
           </div>
-        </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
         {meta && meta.generatedCount > 0 && results.length === 0 && !meta.relaxedTldFilter ? (
-          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/30">
-            <p className="text-[var(--foreground)]">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm dark:border-amber-800 dark:bg-amber-950/30">
+            <p className="text-foreground">
               We generated and checked <strong>{meta.generatedCount} names</strong>, but {form.requireAllTlds ? <><strong>none had all of your selected TLDs</strong> (e.g. both .com and .ai) available at once.</> : <><strong>none had any of your selected TLDs</strong> available.</>} So there’s nothing to show in the table. Try &quot;Refine Based on Available&quot; after a run that had some availability, or relax criteria (e.g. allow dictionary words, higher temperature) and generate again.
             </p>
           </div>
         ) : null}
 
         {(meta?.fallbackUsed || meta?.relaxedTldFilter) ? (
-          <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/30">
-            <p className="text-[var(--foreground)]">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm dark:border-amber-800 dark:bg-amber-950/30">
+            <p className="text-foreground">
               {meta.relaxedTldFilter && meta.fallbackUsed
                 ? "No names had all selected TLDs available. Ran a fallback with relaxed criteria and are showing names that have at least one of your selected TLDs."
                 : meta.relaxedTldFilter
@@ -722,16 +770,16 @@ export default function Home(): React.JSX.Element {
         ) : null}
 
         {meta?.summary ? (
-          <div className="mt-4 rounded-lg border border-[var(--card-border)] bg-[var(--background)] p-4">
-            <h3 className="text-sm font-semibold text-[var(--foreground)]">Summary conclusion</h3>
-            <p className="mt-1 text-sm text-[var(--muted)]">{meta.summary}</p>
+          <div className="rounded-lg border border-border bg-muted/30 p-4">
+            <h3 className="text-sm font-semibold text-foreground">Summary conclusion</h3>
+            <p className="mt-1 text-sm text-muted-foreground">{meta.summary}</p>
           </div>
         ) : null}
 
         {meta?.recommendations?.length ? (
-          <div className="mt-4 rounded-lg border border-[var(--card-border)] bg-[var(--background)] p-4">
-            <h3 className="text-sm font-semibold text-[var(--foreground)]">Top recommendations</h3>
-            <ul className="mt-2 grid gap-2">
+          <div className="rounded-lg border border-border bg-muted/30 p-4">
+            <h3 className="text-sm font-semibold text-foreground">Top recommendations</h3>
+            <ul className="mt-3 grid gap-2">
               {meta.recommendations.map((rec) => {
                 const candidate = results.find((c) => c.base === rec.base);
                 const copyText = `${rec.base}\n${rec.reason}`;
@@ -741,62 +789,57 @@ export default function Home(): React.JSX.Element {
                 return (
                   <li
                     key={`${rec.base}-${rec.reason}`}
-                    className="rounded-md border border-[var(--card-border)] bg-[var(--card)] p-3"
+                    className="flex items-start justify-between gap-2 rounded-lg border border-border bg-card p-3"
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <p className="font-mono text-sm font-medium text-[var(--foreground)]">{rec.base}</p>
-                        <p className="mt-1 text-sm text-[var(--muted)]">{rec.reason}</p>
-                        {candidate ? (
-                          <div className="mt-2 flex flex-wrap gap-1.5">
-                            {candidate.domains.map((d) => {
-                              const isPremium = Boolean(d.premium);
-                              const priceStr = formatPremiumPrice(d.price);
-                              const tooltip = d.available
-                                ? isPremium
-                                  ? priceStr
-                                    ? `Available for purchase at premium price: ${priceStr}`
-                                    : "Available for purchase at premium price (e.g. aftermarket)"
-                                  : "Available"
-                                : "Taken";
-                              const chipClass = d.available
-                                ? isPremium
-                                  ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
-                                  : "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300"
-                                : "bg-red-100 text-red-800 line-through dark:bg-red-900/40 dark:text-red-300";
-                              return (
-                                <span
-                                  key={d.domain}
-                                  className={`inline-flex items-center rounded px-2 py-0.5 font-mono text-xs ${chipClass}`}
-                                  title={tooltip}
-                                >
-                                  {d.domain}
-                                  {d.available ? (isPremium ? (priceStr ? ` (premium – ${priceStr})` : " (premium – price on request)") : "") : " (taken)"}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        ) : null}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={copyRecommendation}
-                        className="shrink-0 rounded p-1.5 text-[var(--muted)] hover:bg-[var(--background)] hover:text-[var(--foreground)]"
-                        title="Copy name and reason"
-                        aria-label="Copy"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16V4a2 2 0 0 1 2-2h10"/></svg>
-                      </button>
-                      <button
-                        type="button"
+                    <div className="min-w-0 flex-1">
+                      <p className="font-mono text-sm font-medium text-foreground">{rec.base}</p>
+                      <p className="mt-1 text-sm text-muted-foreground">{rec.reason}</p>
+                      {candidate ? (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {candidate.domains.map((d) => {
+                            const isPremium = Boolean(d.premium);
+                            const priceStr = formatPremiumPrice(d.price);
+                            const tooltip = d.available
+                              ? isPremium
+                                ? priceStr
+                                  ? `Available for purchase at premium price: ${priceStr}`
+                                  : "Available for purchase at premium price (e.g. aftermarket)"
+                                : "Available"
+                              : "Taken";
+                            const variant = d.available
+                              ? isPremium
+                                ? "secondary"
+                                : "default"
+                              : "outline";
+                            return (
+                              <Badge
+                                key={d.domain}
+                                variant={variant}
+                                className="font-mono"
+                                title={tooltip}
+                              >
+                                {d.domain}
+                                {d.available ? (isPremium ? (priceStr ? ` (premium – ${priceStr})` : " (premium – price on request)") : "") : " (taken)"}
+                              </Badge>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="flex shrink-0 gap-1">
+                      <Button variant="ghost" size="icon" onClick={copyRecommendation} title="Copy name and reason" aria-label="Copy">
+                        <Copy className="size-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
                         onClick={() => candidate && handleSaveOne(candidate)}
-                        className="shrink-0 rounded p-1.5 text-[var(--muted)] hover:bg-[var(--background)] hover:text-[var(--foreground)]"
                         title="Save this name"
                         aria-label="Save"
                         disabled={!candidate}
                       >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-                      </button>
+                        <Save className="size-4" />
+                      </Button>
                     </div>
                   </li>
                 );
@@ -805,98 +848,103 @@ export default function Home(): React.JSX.Element {
           </div>
         ) : null}
 
-        <div className="mt-4 overflow-x-auto">
-          <p className="mb-2 text-xs text-[var(--muted)]">
-            <span className="inline-block w-3 h-3 rounded-sm bg-emerald-500/80 align-middle mr-1" aria-hidden /> Available
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            <span className="inline-block size-3 rounded-sm bg-emerald-500/80 align-middle mr-1" aria-hidden /> Available
             {" · "}
-            <span className="inline-block w-3 h-3 rounded-sm bg-amber-500/80 align-middle mr-1" aria-hidden /> Premium (available but for sale at higher price, e.g. aftermarket)
+            <span className="inline-block size-3 rounded-sm bg-amber-500/80 align-middle mr-1" aria-hidden /> Premium
             {" · "}
-            <span className="inline-block w-3 h-3 rounded-sm bg-[var(--muted)] align-middle mr-1" aria-hidden /> Taken
-            {" · "}
-            Dollar amounts show when your domain service returns a price (e.g. <code className="rounded bg-[var(--background)] px-1">price</code> or <code className="rounded bg-[var(--background)] px-1">priceUsd</code>).
+            <span className="inline-block size-3 rounded-sm bg-muted align-middle mr-1" aria-hidden /> Taken
           </p>
-          <table className="min-w-full border-collapse text-left text-sm">
-            <thead>
-              <tr className="border-b border-[var(--card-border)]">
-                <th className="px-2 py-2 font-medium text-[var(--foreground)]">Base</th>
-                <th className="px-2 py-2 font-medium text-[var(--foreground)]">Domains</th>
-                <th className="px-2 py-2 font-medium text-[var(--foreground)]">Rationale</th>
-                <th className="px-2 py-2 font-medium text-[var(--foreground)]">Score</th>
-                <th className="w-10 px-2 py-2" aria-label="Save" />
-              </tr>
-            </thead>
-            <tbody>
-              {results.map((candidate) => (
-                <tr key={candidate.base} className="border-b border-[var(--card-border)]/60 align-top">
-                  <td className="px-2 py-2 font-mono text-[var(--foreground)]">{candidate.base}</td>
-                  <td className="px-2 py-2">
-                    <div className="flex flex-col gap-1">
-                      {candidate.domains.map((domain) => {
-                        const isAvailable = domain.available;
-                        const isPremium = Boolean(domain.premium);
-                        const priceStr = formatPremiumPrice(domain.price);
-                        const domainTooltip = isAvailable
-                          ? isPremium
-                            ? priceStr
-                              ? `Available for purchase at premium price: ${priceStr}`
-                              : "Available for purchase at premium price (e.g. aftermarket)"
-                            : "Available"
-                          : domain.status === "error"
-                            ? "Error checking availability"
-                            : "Taken";
-                        const badgeClass = isAvailable
-                          ? isPremium
-                            ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
-                            : "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300"
-                          : domain.status === "error"
-                            ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
-                            : "bg-[var(--background)] text-[var(--muted)]";
-                        return (
-                          <span
-                            key={`${candidate.base}-${domain.domain}`}
-                            className={`inline-block rounded-md px-2 py-1 font-mono text-xs ${badgeClass}`}
-                            title={domainTooltip}
-                          >
-                            {domain.domain}
-                            {isPremium ? (priceStr ? ` (premium – ${priceStr})` : " (premium – price on request)") : ""}
-                            {!isAvailable && domain.status === "taken" ? " (taken)" : ""}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </td>
-                  <td className="px-2 py-2 text-[var(--muted)]">
-                    {candidate.rationale ?? "-"}
-                  </td>
-                  <td className="px-2 py-2 text-[var(--foreground)]">{candidate.score}</td>
-                  <td className="px-2 py-2">
-                    <button
-                      type="button"
-                      onClick={() => handleSaveOne(candidate)}
-                      className="rounded p-1.5 text-[var(--muted)] hover:bg-[var(--background)] hover:text-[var(--foreground)]"
-                      title="Save this name"
-                      aria-label="Save"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-                    </button>
-                  </td>
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="min-w-full border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-border bg-muted/50">
+                  <th className="px-4 py-3 font-medium text-foreground">Base</th>
+                  <th className="px-4 py-3 font-medium text-foreground">Domains</th>
+                  <th className="px-4 py-3 font-medium text-foreground">Rationale</th>
+                  <th className="px-4 py-3 font-medium text-foreground">Score</th>
+                  <th className="w-12 px-4 py-3" aria-label="Save" />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {results.map((candidate) => (
+                  <tr key={candidate.base} className="border-b border-border/60 align-top transition-colors hover:bg-muted/30">
+                    <td className="px-4 py-3 font-mono text-foreground">{candidate.base}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-col gap-1">
+                        {candidate.domains.map((domain) => {
+                          const isAvailable = domain.available;
+                          const isPremium = Boolean(domain.premium);
+                          const priceStr = formatPremiumPrice(domain.price);
+                          const domainTooltip = isAvailable
+                            ? isPremium
+                              ? priceStr
+                                ? `Available for purchase at premium price: ${priceStr}`
+                                : "Available for purchase at premium price (e.g. aftermarket)"
+                              : "Available"
+                            : domain.status === "error"
+                              ? "Error checking availability"
+                              : "Taken";
+                          const badgeVariant = isAvailable
+                            ? isPremium
+                              ? "secondary"
+                              : "default"
+                            : domain.status === "error"
+                              ? "secondary"
+                              : "outline";
+                          return (
+                            <Badge
+                              key={`${candidate.base}-${domain.domain}`}
+                              variant={badgeVariant}
+                              className="w-fit font-mono"
+                              title={domainTooltip}
+                            >
+                              {domain.domain}
+                              {isPremium ? (priceStr ? ` (premium – ${priceStr})` : " (premium – price on request)") : ""}
+                              {!isAvailable && domain.status === "taken" ? " (taken)" : ""}
+                            </Badge>
+                          );
+                        })}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {candidate.rationale ?? "-"}
+                    </td>
+                    <td className="px-4 py-3 text-foreground">{candidate.score}</td>
+                    <td className="px-4 py-3">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleSaveOne(candidate)}
+                        title="Save this name"
+                        aria-label="Save"
+                      >
+                        <Save className="size-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </section>
+        </CardContent>
+      </Card>
 
       {results.length > 0 ? (
-        <section className="rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-[var(--foreground)]">Ask about these names</h2>
-          <p className="mt-1 text-sm text-[var(--muted)]">
+        <Card>
+          <CardHeader>
+            <CardTitle>Ask about these names</CardTitle>
+            <CardDescription>
             Query the set of {results.length} names (e.g. “Which are shortest?”, “List names with .com or .ai available”, “Group by style”).
-          </p>
-          <div className="mt-4 flex flex-col gap-3">
-            <div className="flex flex-col gap-2 overflow-y-auto max-h-[320px] rounded-lg border border-[var(--card-border)] bg-[var(--background)] p-3">
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-col gap-2 overflow-y-auto max-h-[320px] rounded-lg border border-border bg-muted/30 p-3">
               {chatMessages.length === 0 ? (
-                <p className="text-sm text-[var(--muted)]">No messages yet. Ask a question above.</p>
+                <p className="text-sm text-muted-foreground">No messages yet. Ask a question below.</p>
               ) : (
                 chatMessages.map((m, i) => (
                   <div
@@ -906,8 +954,8 @@ export default function Home(): React.JSX.Element {
                     <div
                       className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
                         m.role === "user"
-                          ? "bg-[var(--primary)] text-[var(--primary-foreground)]"
-                          : "bg-[var(--background)] text-[var(--foreground)] border border-[var(--card-border)]"
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-background text-foreground border border-border"
                       }`}
                     >
                       <span className="whitespace-pre-wrap">{m.content}</span>
@@ -916,31 +964,31 @@ export default function Home(): React.JSX.Element {
                 ))
               )}
               {chatLoading ? (
-                <p className="text-sm text-[var(--muted)]">Thinking...</p>
+                <p className="text-sm text-muted-foreground">Thinking...</p>
               ) : null}
             </div>
             <div className="flex gap-2">
-              <input
+              <Input
                 type="text"
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendChat()}
                 placeholder="e.g. Which names have .com or .ai available?"
-                className="flex-1 rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] placeholder:text-[var(--muted)] outline-none focus:border-[var(--primary)] focus:ring-1 focus:ring-[var(--primary)]"
                 disabled={chatLoading}
+                className="flex-1"
               />
-              <button
+              <Button
                 type="button"
                 onClick={sendChat}
                 disabled={chatLoading || !chatInput.trim()}
-                className="rounded-lg bg-[var(--primary)] px-4 py-2 text-sm font-medium text-[var(--primary-foreground)] hover:opacity-90 disabled:opacity-50"
               >
                 Send
-              </button>
+              </Button>
             </div>
-          </div>
-        </section>
+          </CardContent>
+        </Card>
       ) : null}
+        </div>
     </main>
     </div>
   );

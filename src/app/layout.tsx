@@ -26,10 +26,26 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+(function() {
+  var k = 'naming-lab-theme';
+  try {
+    var t = localStorage.getItem(k);
+    var el = document.documentElement;
+    if (t === 'dark') { el.classList.add('dark'); el.classList.remove('theme-light'); }
+    else if (t === 'light') { el.classList.add('theme-light'); el.classList.remove('dark'); }
+    else { el.classList.remove('dark', 'theme-light'); }
+  } catch (e) {}
+})();
+            `.trim(),
+          }}
+        />
         {children}
       </body>
     </html>
