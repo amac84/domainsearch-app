@@ -8,6 +8,7 @@ interface DynadotProviderOptions {
 }
 
 interface DynadotListingItemResponse {
+  [key: string]: unknown;
   GetListingsItemResponse?: {
     ResponseCode?: number;
     Status?: string;
@@ -21,6 +22,7 @@ interface DynadotListingItemResponse {
 }
 
 interface DynadotOpenAuctionsResponse {
+  [key: string]: unknown;
   GetOpenAuctionsResponse?: {
     ResponseCode?: number;
     Status?: string;
@@ -107,7 +109,7 @@ export class DynadotProvider implements DomainMarketplaceProvider {
     return this.dedupe(listings);
   }
 
-  private async callApi<T extends { [k: string]: unknown }>(
+  private async callApi<T extends object>(
     params: Record<string, string>,
   ): Promise<T> {
     const url = new URL(this.baseUrl);
