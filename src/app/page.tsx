@@ -535,6 +535,14 @@ function isAuthRequiredError(error: unknown): boolean {
   );
 }
 
+function formatAccountDataLoadError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : "Unable to load account data.";
+  if (/Could not find the table|saved_names|search_history|schema cache/i.test(raw)) {
+    return "Saved names and history need database tables. In Supabase → SQL Editor, run docs/supabase-schema.sql from this repository, then refresh this page.";
+  }
+  return raw;
+}
+
 export default function Home(): React.JSX.Element {
   const [form, setForm] = useState<FormState>(DEFAULT_FORM);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -669,17 +677,55 @@ export default function Home(): React.JSX.Element {
           };
         };
 
-        const [saved, history] = await Promise.all([
-          fetchSavedNames(),
-          fetchSearchHistory(),
-        ]);
-
         if (cancelled) return;
         setIsAuthenticated(true);
         setUserEmail(payload.user?.email ?? null);
         setUserFirstName(payload.user?.firstName ?? null);
-        setSavedNames(saved);
-        setSearchHistory(history);
+
+        const syncIssues: string[] = [];
+        let authLost = false;
+
+        try {
+          setSavedNames(await fetchSavedNames());
+        } catch (savedError) {
+          if (cancelled) return;
+          setSavedNames([]);
+          if (isAuthRequiredError(savedError)) {
+            authLost = true;
+          } else {
+            syncIssues.push(formatAccountDataLoadError(savedError));
+          }
+        }
+
+        if (authLost) {
+          if (!cancelled) {
+            setIsAuthenticated(false);
+            setUserEmail(null);
+            setUserFirstName(null);
+          }
+          return;
+        }
+
+        try {
+          setSearchHistory(await fetchSearchHistory());
+        } catch (historyError) {
+          if (cancelled) return;
+          setSearchHistory([]);
+          if (isAuthRequiredError(historyError)) {
+            if (!cancelled) {
+              setIsAuthenticated(false);
+              setUserEmail(null);
+              setUserFirstName(null);
+            }
+            return;
+          }
+          syncIssues.push(formatAccountDataLoadError(historyError));
+        }
+
+        if (syncIssues.length > 0 && !cancelled) {
+          setSavingStateError([...new Set(syncIssues)].join(" "));
+        }
+
         try {
           const feedbackImpact = await fetchFeedbackImpact();
           if (!cancelled) {

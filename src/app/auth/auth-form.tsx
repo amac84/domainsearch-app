@@ -15,7 +15,8 @@ interface AuthFormProps {
 export function AuthForm({ nextPath }: AuthFormProps): React.JSX.Element {
   const [email, setEmail] = useState("");
   const [sendingLink, setSendingLink] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [linkSentTo, setLinkSentTo] = useState<string | null>(null);
   const getRedirectTarget = (): string => {
     const origin = typeof window === "undefined" ? "" : window.location.origin;
     const next = nextPath.startsWith("/") ? nextPath : "/";
@@ -25,21 +26,24 @@ export function AuthForm({ nextPath }: AuthFormProps): React.JSX.Element {
   const signInEmail = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (sendingLink) return;
-    setStatus(null);
+    setErrorMessage(null);
+    setLinkSentTo(null);
     setSendingLink(true);
     try {
       const supabase = getSupabaseBrowserClient();
+      const trimmed = email.trim();
       const { error } = await supabase.auth.signInWithOtp({
-        email: email.trim(),
+        email: trimmed,
         options: {
           emailRedirectTo: getRedirectTarget(),
+          shouldCreateUser: true,
         },
       });
       if (error) throw error;
-      setStatus("Check your email for the secure sign-in link.");
+      setLinkSentTo(trimmed);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unable to send email link.";
-      setStatus(message);
+      setErrorMessage(message);
     } finally {
       setSendingLink(false);
     }
@@ -62,7 +66,11 @@ export function AuthForm({ nextPath }: AuthFormProps): React.JSX.Element {
                 autoComplete="email"
                 placeholder="friend@example.com"
                 value={email}
-                onChange={(event) => setEmail(event.target.value)}
+                onChange={(event) => {
+                  setEmail(event.target.value);
+                  setLinkSentTo(null);
+                  setErrorMessage(null);
+                }}
                 required
               />
             </div>
@@ -71,7 +79,25 @@ export function AuthForm({ nextPath }: AuthFormProps): React.JSX.Element {
             </Button>
           </form>
 
-          {status ? <p className="text-sm text-muted-foreground">{status}</p> : null}
+          {linkSentTo ? (
+            <div className="space-y-3 rounded-md border border-border bg-muted/40 p-4 text-sm text-foreground">
+              <p className="font-medium">We sent a sign-in link</p>
+              <p className="text-muted-foreground">
+                Open the message sent to <span className="font-medium text-foreground">{linkSentTo}</span>{" "}
+                and tap <strong className="text-foreground">Log in</strong> (or the button in that email).
+                You will land back in Naming Lab signed in.
+              </p>
+              <ul className="list-disc space-y-1 pl-4 text-muted-foreground">
+                <li>Check spam or promotions if nothing arrives within a minute or two.</li>
+                <li>Magic links expire; request a new one from this page if the link is old.</li>
+                <li>
+                  To change the sender name, subject, or wording of that email, use Supabase → Authentication
+                  → Email templates (and optional custom SMTP).
+                </li>
+              </ul>
+            </div>
+          ) : null}
+          {errorMessage ? <p className="text-sm text-destructive">{errorMessage}</p> : null}
         </CardContent>
       </Card>
     </main>
