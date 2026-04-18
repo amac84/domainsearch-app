@@ -1,5 +1,16 @@
 import { checkDomains } from "@/lib/domain-checker";
-import { buildDomainsForNames, normalizeBaseNames } from "@/lib/domain-utils";
+
+/** User-visible message when the lookup service returns errors for every request. */
+export const DOMAIN_LOOKUP_UNAVAILABLE_MESSAGE =
+  "The domain availability API failed for every lookup. " +
+  "Either switch to WhoisXML by setting DOMAIN_CHECK_PROVIDER=whoisxml and WHOISXML_API_KEY (see README), " +
+  "or fix your HTTP lookup: AGENT_DOMAIN_SERVICE_URL and AGENT_DOMAIN_SERVICE_CHECK_PATH under Project → Settings → Environment Variables for Production (local .env is not used on the live site). " +
+  "The default agentdomainservice.com host must be running; if it is paused on Vercel it returns HTTP 503 until you resume it or change provider.";
+import {
+  buildDomainsForNames,
+  normalizeBaseName,
+  normalizeBaseNames,
+} from "@/lib/domain-utils";
 import { generateNames } from "@/lib/name-generation";
 import { runQualityRanking } from "@/lib/quality-rank";
 import { summarizeReferenceDomain } from "@/lib/reference-site-summary";
@@ -18,6 +29,12 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+/** Ranking uses a single style; use first when multiple are selected. */
+function nameStyleForRank(nameStyle: string | string[] | undefined): string | undefined {
+  if (nameStyle == null) return undefined;
+  return Array.isArray(nameStyle) ? nameStyle[0] : nameStyle;
+}
+
 function toGenerationInput(
   body: GenerateRequestBody,
   refineFrom?: RefinementInputName[],
@@ -26,6 +43,7 @@ function toGenerationInput(
     summary?: string;
     keywords?: string[];
   },
+  avoidBases?: string[],
 ): NameGenerationInput {
   return {
     description: body.description,
@@ -34,14 +52,20 @@ function toGenerationInput(
     referenceSeoKeywords: referenceSeoContext?.keywords,
     industry: body.industry,
     tone: body.tone,
+    nameStyle: body.nameStyle,
+    wordConstraint: body.wordConstraint,
+    syllableConstraint: body.syllableConstraint,
+    wordTypeConstraint: body.wordTypeConstraint,
     maxLength: clamp(body.maxLength ?? 10, 4, 20),
     maxSyllables: clamp(body.maxSyllables ?? 3, 1, 6),
-    avoidDictionaryWords: Boolean(body.avoidDictionaryWords),
+    avoidDictionaryWords:
+      Boolean(body.avoidDictionaryWords) || body.wordTypeConstraint === "invented",
     avoidWords: body.avoidWords?.filter(Boolean).slice(0, 20) ?? [],
-    temperature: clamp(body.temperature ?? 0.7, 0.3, 1.2),
+    temperature: clamp(body.temperature ?? 0.8, 0.3, 1.2),
     count: clamp(body.count ?? 100, 50, 200),
     refineFrom,
     prioritizePremiumTlds,
+    avoidBases,
   };
 }
 
@@ -135,27 +159,32 @@ function reorderWithRationales(
 async function buildNameCandidates(
   names: string[],
   request: GenerateRequestBody,
-): Promise<NameCandidate[]> {
+): Promise<{ candidates: NameCandidate[]; lookupServiceUnavailable: boolean }> {
   const normalizedNames = normalizeBaseNames(names, request.maxLength ?? 10);
   const domainPairs = buildDomainsForNames(normalizedNames, {
     tlds: request.tlds,
     includePrefixVariants: request.includePrefixVariants,
   });
-  const checkedDomains = await checkDomains(
-    domainPairs.map((pair) => pair.domain),
-    {
-      baseUrl: process.env.AGENT_DOMAIN_SERVICE_URL ?? "https://agentdomainservice.com",
-      endpointPath:
-        process.env.AGENT_DOMAIN_SERVICE_CHECK_PATH ?? "/api/lookup/{base}",
-      ttlSeconds: Number(process.env.DOMAIN_CHECK_CACHE_TTL_SECONDS ?? "21600"),
-      concurrency: Number(process.env.DOMAIN_CHECK_CONCURRENCY ?? "15"),
-    },
-  );
+  if (domainPairs.length === 0) {
+    return { candidates: [], lookupServiceUnavailable: false };
+  }
+
+  const domainList = domainPairs.map((pair) => pair.domain);
+  const providerEnv = process.env.DOMAIN_CHECK_PROVIDER?.trim().toLowerCase();
+  const provider = providerEnv === "whoisxml" ? "whoisxml" : "http";
+  const { byDomain, allFetchAttemptsFailed } = await checkDomains(domainList, {
+    provider,
+    baseUrl: process.env.AGENT_DOMAIN_SERVICE_URL ?? "https://agentdomainservice.com",
+    endpointPath:
+      process.env.AGENT_DOMAIN_SERVICE_CHECK_PATH ?? "/api/lookup/{base}",
+    ttlSeconds: Number(process.env.DOMAIN_CHECK_CACHE_TTL_SECONDS ?? "21600"),
+    concurrency: Number(process.env.DOMAIN_CHECK_CONCURRENCY ?? "20"),
+  });
 
   const groupedByBase = new Map<string, DomainResult[]>();
   for (const pair of domainPairs) {
     const existing = groupedByBase.get(pair.base) ?? [];
-    const result = checkedDomains.get(pair.domain);
+    const result = byDomain.get(pair.domain);
     if (result) {
       existing.push(result);
     }
@@ -169,12 +198,18 @@ async function buildNameCandidates(
       score: 0,
     }),
   );
-  return rankCandidates(unranked);
+  return {
+    candidates: rankCandidates(unranked, {
+      selectedTlds: request.tlds,
+      nameStyle: nameStyleForRank(request.nameStyle),
+    }),
+    lookupServiceUnavailable: allFetchAttemptsFailed,
+  };
 }
 
 const PREMIUM_TLDS = ["com", "ai"];
 const MIN_PREMIUM_TARGET_DEFAULT = 5;
-const MAX_PREMIUM_REFINEMENT_ROUNDS = 8;
+const MAX_PREMIUM_REFINEMENT_ROUNDS = 6;
 const QUALITY_PASS_THRESHOLD = 30;
 
 function countWithAllSelectedTlds(
@@ -200,6 +235,8 @@ export interface PipelineResult {
   comAvailableCount: number;
   aiAvailableCount: number;
   premiumAvailableCount: number;
+  /** True when a domain check batch had all network requests fail (e.g. service 503). */
+  domainLookupFailure?: boolean;
   summary?: string;
   recommendations?: GenerateResponseBody["meta"]["recommendations"];
 }
@@ -215,7 +252,11 @@ async function runGenerationPipeline(
   } | null,
   onProgress?: ProgressCallback,
   logContext: LogContext = {},
-): Promise<{ names: NameCandidate[]; refinementRounds: number }> {
+): Promise<{
+  names: NameCandidate[];
+  refinementRounds: number;
+  domainLookupFailure: boolean;
+}> {
   const selectedTlds = body.tlds.map((t) => t.toLowerCase().replace(/^\.+/, ""));
   const selectedPremiumTlds = PREMIUM_TLDS.filter((tld) =>
     selectedTlds.includes(tld),
@@ -226,11 +267,42 @@ async function runGenerationPipeline(
     body.minPremiumTarget ?? body.minComTarget ?? MIN_PREMIUM_TARGET_DEFAULT,
   );
 
+  const maxLength = clamp(body.maxLength ?? 10, 4, 20);
+  // Bases the LLM is told never to repeat. Seeded from the parent search when
+  // refining (so a refinement run never re-emits names from the original run),
+  // and grown after every round below.
+  const attemptedBases = new Set<string>();
+  const recordAttempted = (bases: Iterable<string>): void => {
+    for (const base of bases) {
+      const normalized = normalizeBaseName(base, maxLength);
+      if (normalized) {
+        attemptedBases.add(normalized);
+      }
+    }
+  };
+  if (body.refineFrom?.namesWithAvailability) {
+    recordAttempted(
+      body.refineFrom.namesWithAvailability.map((item) => item.base),
+    );
+  }
+  const filterAndRecord = (rawNames: string[]): string[] => {
+    const fresh: string[] = [];
+    for (const name of rawNames) {
+      const normalized = normalizeBaseName(name, maxLength);
+      if (!normalized) continue;
+      if (attemptedBases.has(normalized)) continue;
+      attemptedBases.add(normalized);
+      fresh.push(name);
+    }
+    return fresh;
+  };
+
   const firstPassInput = toGenerationInput(
     body,
     body.refineFrom?.namesWithAvailability,
     undefined,
     referenceSeoContext ?? undefined,
+    body.refineFrom ? Array.from(attemptedBases) : undefined,
   );
   onProgress?.("Generating first batch of names…");
   logInfo("pipeline.first_pass.start", {
@@ -238,13 +310,25 @@ async function runGenerationPipeline(
     requestedCount: firstPassInput.count,
     temperature: firstPassInput.temperature,
   });
-  const firstPassNames = await generateNames(firstPassInput);
+  const firstPassRaw = await generateNames(firstPassInput);
+  const firstPassNames = filterAndRecord(firstPassRaw);
   logInfo("pipeline.first_pass.generated", {
     ...logContext,
     generatedCount: firstPassNames.length,
+    duplicatesDropped: firstPassRaw.length - firstPassNames.length,
   });
   onProgress?.(`Generated ${firstPassNames.length} names. Checking domain availability…`);
-  let ranked = await buildNameCandidates(firstPassNames, body);
+  const firstPass = await buildNameCandidates(firstPassNames, body);
+  let ranked = firstPass.candidates;
+  if (firstPass.lookupServiceUnavailable) {
+    logWarn("pipeline.domain_lookup_unavailable.abort", {
+      ...logContext,
+      phase: "first_pass",
+      candidateCount: ranked.length,
+    });
+    onProgress?.("Domain lookup service unavailable — stopping. Check your domain API URL or try again later.");
+    return { names: ranked, refinementRounds: 0, domainLookupFailure: true };
+  }
   logInfo("pipeline.first_pass.rank_complete", {
     ...logContext,
     candidateCount: ranked.length,
@@ -276,19 +360,38 @@ async function runGenerationPipeline(
         })),
         selectedPremiumTlds,
         referenceSeoContext ?? undefined,
+        Array.from(attemptedBases),
       ),
       temperature: 0.95,
       count: Math.min(firstPassInput.count, 80),
     };
-    const secondPassNames = await generateNames(secondPassInput);
+    const secondPassRaw = await generateNames(secondPassInput);
+    const secondPassNames = filterAndRecord(secondPassRaw);
     logInfo("pipeline.second_pass.generated", {
       ...logContext,
       generatedCount: secondPassNames.length,
+      duplicatesDropped: secondPassRaw.length - secondPassNames.length,
       temperature: secondPassInput.temperature,
     });
     onProgress?.("Checking availability for second batch…");
-    const secondPassRanked = await buildNameCandidates(secondPassNames, body);
-    ranked = rankCandidates([...ranked, ...secondPassRanked]);
+    const secondPass = await buildNameCandidates(secondPassNames, body);
+    if (secondPass.lookupServiceUnavailable) {
+      ranked = rankCandidates([...ranked, ...secondPass.candidates], {
+        selectedTlds: body.tlds,
+        nameStyle: nameStyleForRank(body.nameStyle),
+      });
+      logWarn("pipeline.domain_lookup_unavailable.abort", {
+        ...logContext,
+        phase: "second_pass",
+        candidateCount: ranked.length,
+      });
+      onProgress?.("Domain lookup service unavailable — stopping. Check your domain API URL or try again later.");
+      return { names: ranked, refinementRounds: 1, domainLookupFailure: true };
+    }
+    ranked = rankCandidates([...ranked, ...secondPass.candidates], {
+      selectedTlds: body.tlds,
+      nameStyle: nameStyleForRank(body.nameStyle),
+    });
     logInfo("pipeline.second_pass.rank_complete", {
       ...logContext,
       candidateCount: ranked.length,
@@ -322,21 +425,42 @@ async function runGenerationPipeline(
         refinementInput,
         selectedPremiumTlds,
         referenceSeoContext ?? undefined,
+        Array.from(attemptedBases),
       ),
       count: Math.min(firstPassInput.count, 60),
       temperature: 0.85,
     };
-    const nextNames = await generateNames(nextInput);
+    const nextRaw = await generateNames(nextInput);
+    const nextNames = filterAndRecord(nextRaw);
     logInfo("pipeline.refinement.generated", {
       ...logContext,
       round: round + 1,
       generatedCount: nextNames.length,
+      duplicatesDropped: nextRaw.length - nextNames.length,
       selectedTlds,
       requireAllTlds,
     });
     onProgress?.("Checking availability for refinement batch…");
-    const nextRanked = await buildNameCandidates(nextNames, body);
-    ranked = rankCandidates([...ranked, ...nextRanked]);
+    const nextPass = await buildNameCandidates(nextNames, body);
+    if (nextPass.lookupServiceUnavailable) {
+      ranked = rankCandidates([...ranked, ...nextPass.candidates], {
+        selectedTlds: body.tlds,
+        nameStyle: nameStyleForRank(body.nameStyle),
+      });
+      logWarn("pipeline.domain_lookup_unavailable.abort", {
+        ...logContext,
+        phase: "refinement",
+        round: round + 1,
+        candidateCount: ranked.length,
+      });
+      onProgress?.("Domain lookup service unavailable — stopping. Check your domain API URL or try again later.");
+      refinementRounds = round + 1;
+      return { names: ranked, refinementRounds, domainLookupFailure: true };
+    }
+    ranked = rankCandidates([...ranked, ...nextPass.candidates], {
+      selectedTlds: body.tlds,
+      nameStyle: nameStyleForRank(body.nameStyle),
+    });
     logInfo("pipeline.refinement.rank_complete", {
       ...logContext,
       round: round + 1,
@@ -348,7 +472,7 @@ async function runGenerationPipeline(
   }
   refinementRounds = round;
 
-  return { names: ranked, refinementRounds };
+  return { names: ranked, refinementRounds, domainLookupFailure: false };
 }
 
 export async function runFullPipeline(
@@ -393,12 +517,8 @@ export async function runFullPipeline(
     }
   }
 
-  const { names: generatedNames, refinementRounds } = await runGenerationPipeline(
-    body,
-    referenceSeoContext,
-    onProgress,
-    logContext,
-  );
+  const { names: generatedNames, refinementRounds, domainLookupFailure } =
+    await runGenerationPipeline(body, referenceSeoContext, onProgress, logContext);
   const checkedDomains = generatedNames.reduce(
     (acc, value) => acc + value.domains.length,
     0,
@@ -406,6 +526,26 @@ export async function runFullPipeline(
   const comAvailableCount = countExactAvailableByTld(generatedNames, "com");
   const aiAvailableCount = countExactAvailableByTld(generatedNames, "ai");
   const premiumAvailableCount = countPremiumAvailable(generatedNames, PREMIUM_TLDS);
+
+  if (domainLookupFailure) {
+    logWarn("pipeline.run.domain_lookup_failure", {
+      ...logContext,
+      generatedCount: generatedNames.length,
+      checkedDomains,
+    });
+    return {
+      generatedNames,
+      names: generatedNames,
+      namesBeforeTldFilter: generatedNames,
+      refinementRounds,
+      checkedDomains,
+      comAvailableCount,
+      aiAvailableCount,
+      premiumAvailableCount,
+      domainLookupFailure: true,
+    };
+  }
+
   let names = generatedNames;
   let summary: string | undefined;
   let recommendations: GenerateResponseBody["meta"]["recommendations"];
@@ -416,6 +556,7 @@ export async function runFullPipeline(
       description: body.description,
       industry: body.industry,
       tone: body.tone,
+      nameStyle: body.nameStyle,
       referenceSeoSummary: referenceSeoContext?.summary,
       referenceSeoKeywords: referenceSeoContext?.keywords,
       names: generatedNames,
@@ -474,6 +615,7 @@ export async function runFullPipeline(
     comAvailableCount,
     aiAvailableCount,
     premiumAvailableCount,
+    domainLookupFailure: false,
     summary,
     recommendations,
   };
@@ -542,6 +684,9 @@ export function buildResponse(
       summary: result.summary,
       recommendations,
       ...metaOverrides,
+      ...(result.domainLookupFailure
+        ? { domainLookupError: DOMAIN_LOOKUP_UNAVAILABLE_MESSAGE }
+        : {}),
     },
   };
 }

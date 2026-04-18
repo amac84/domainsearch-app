@@ -6,11 +6,17 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "deploy": "npx --yes vercel@latest deploy --prod --yes",
+    "deploy:preview": "npx --yes vercel@latest deploy --yes",
+    "vercel:push-env": "node scripts/push-env-to-vercel.mjs",
+    "vercel:push-env:dry": "node scripts/push-env-to-vercel.mjs --dry-run",
     "lint": "eslint",
     "prototype:marketplace": "node --env-file=.env --import tsx ./scripts/domain-marketplace-prototype.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.2.0",
+    "@supabase/ssr": "^0.9.0",
+    "@supabase/supabase-js": "^2.99.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.577.0",

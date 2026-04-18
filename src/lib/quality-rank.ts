@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 
-import { getIndustryGuidance, getToneGuidance } from "@/lib/name-generation";
+import { getIndustryGuidance, getCombinedStyleGuidance, getCombinedToneGuidance } from "@/lib/name-generation";
 import type { NameCandidate, NameRecommendation } from "@/types";
 import { logError, logWarn } from "@/lib/server-logger";
 
@@ -22,7 +22,8 @@ function getClient(): OpenAI {
 export interface QualityRankInput {
   description: string;
   industry?: string;
-  tone?: string;
+  tone?: string | string[];
+  nameStyle?: string | string[];
   referenceSeoSummary?: string;
   referenceSeoKeywords?: string[];
   names: NameCandidate[];
@@ -61,7 +62,7 @@ export async function runQualityRanking(
       {
         role: "system",
         content: [
-          "You are an expert brand strategist and growth marketer.",
+          "You are an expert brand naming strategist and growth marketer. Judge names with the same Lunour-style criteria as generation: evocative, memorable, spellable, speakable, ownable, scalable, domain-viable.",
           "Evaluate generated brand names by quality, memorability, pronounceability, and fit to the brand description, industry, and tone below.",
           "Use only the provided names and domain availability. Do not invent new names.",
         ].join(" "),
@@ -78,7 +79,8 @@ export async function runQualityRanking(
             : "",
           `Industry: ${input.industry || "unspecified"}. ${getIndustryGuidance(input.industry)}`,
           "Tone and style (use this when judging fit):",
-          `Tone: ${input.tone || "balanced"}. ${getToneGuidance(input.tone)}`,
+          `Vibe(s): ${Array.isArray(input.tone) ? input.tone.join(", ") : input.tone || "balanced"}. ${getCombinedToneGuidance(input.tone)}`,
+          `Archetype(s): ${Array.isArray(input.nameStyle) ? input.nameStyle.join(", ") : input.nameStyle || "evocative"}. ${getCombinedStyleGuidance(input.nameStyle)}`,
           "Task:",
           "1) Rank names by overall quality (brand fit, memorability, pronounceability) and SEO/discoverability fit for this brand context.",
           "2) Provide one concise rationale per ranked name.",

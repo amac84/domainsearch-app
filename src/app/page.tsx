@@ -2,12 +2,39 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { addSavedName, addSavedNames, getSavedNames, removeSavedName } from "@/lib/saved-storage";
-import type { GenerateResponseBody, NameCandidate, NameRecommendation, RefinementInputName, SavedName } from "@/types";
+import {
+  AuthRequiredError as SearchHistoryAuthRequiredError,
+  clearSearchHistoryEntries,
+  createSearchHistoryEntry,
+  deleteSearchHistoryEntry,
+  fetchSearchHistory,
+} from "@/lib/search-history-api";
+import {
+  AuthRequiredError as SavedNamesAuthRequiredError,
+  createSavedName,
+  createSavedNames,
+  deleteSavedName,
+  fetchSavedNames,
+} from "@/lib/saved-names-api";
+import {
+  dismissFeedbackAcknowledgement,
+  fetchFeedbackImpact,
+  type FeedbackImpactItem,
+  submitSuggestion,
+} from "@/lib/suggestions-api";
+import type {
+  GenerateResponseBody,
+  NameCandidate,
+  NameRecommendation,
+  RefinementInputName,
+  SavedName,
+  SearchHistoryEntry,
+} from "@/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Select,
   SelectContent,
@@ -15,7 +42,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { BubbleSelect } from "@/components/bubble-select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
@@ -24,14 +51,18 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { Copy, ChevronDown, Save, Square, Sparkles, Trash2 } from "lucide-react";
+import { Copy, ChevronDown, CircleHelp, Save, Square, Sparkles, Trash2, X } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 interface FormState {
   description: string;
   referenceDomain: string;
   industry: string;
-  tone: string;
+  tone: string[];
+  nameStyle: string[];
+  wordConstraint: "oneWord" | "twoWord";
+  syllableConstraint: "any" | "two";
+  wordTypeConstraint: "mixed" | "invented" | "dictionary";
   maxLength: number;
   maxSyllables: number;
   avoidDictionaryWords: boolean;
@@ -44,18 +75,197 @@ interface FormState {
   requireAllTlds: boolean;
 }
 
+interface ChatSuggestion {
+  label: string;
+  description?: string | null;
+  tone?: string[] | null;
+  nameStyle?: string[] | null;
+  wordConstraint?: "oneWord" | "twoWord" | null;
+  syllableConstraint?: "any" | "two" | null;
+  wordTypeConstraint?: "mixed" | "invented" | "dictionary" | null;
+  maxLength?: number | null;
+  maxSyllables?: number | null;
+  avoidDictionaryWords?: boolean | null;
+  avoidWords?: string[] | null;
+  tlds?: string[] | null;
+  temperature?: number | null;
+  count?: number | null;
+  includePrefixVariants?: boolean | null;
+  minPremiumTarget?: number | null;
+  requireAllTlds?: boolean | null;
+}
+
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  suggestion?: ChatSuggestion | null;
+}
+
+function mergeFormWithSuggestion(prev: FormState, suggestion: ChatSuggestion): FormState {
+  const mergedAvoidWords =
+    suggestion.avoidWords && suggestion.avoidWords.length > 0
+      ? Array.from(
+          new Set(
+            [
+              ...prev.avoidWords
+                .split(",")
+                .map((w) => w.trim().toLowerCase())
+                .filter(Boolean),
+              ...suggestion.avoidWords.map((w) => w.trim().toLowerCase()).filter(Boolean),
+            ],
+          ),
+        ).join(", ")
+      : prev.avoidWords;
+
+  return {
+    ...prev,
+    description: suggestion.description ?? prev.description,
+    tone: suggestion.tone && suggestion.tone.length > 0 ? suggestion.tone : prev.tone,
+    nameStyle:
+      suggestion.nameStyle && suggestion.nameStyle.length > 0
+        ? suggestion.nameStyle
+        : prev.nameStyle,
+    wordConstraint: suggestion.wordConstraint ?? prev.wordConstraint,
+    syllableConstraint: suggestion.syllableConstraint ?? prev.syllableConstraint,
+    wordTypeConstraint: suggestion.wordTypeConstraint ?? prev.wordTypeConstraint,
+    maxLength:
+      suggestion.maxLength != null && Number.isFinite(suggestion.maxLength)
+        ? Math.min(20, Math.max(4, suggestion.maxLength))
+        : prev.maxLength,
+    maxSyllables:
+      suggestion.maxSyllables != null && Number.isFinite(suggestion.maxSyllables)
+        ? Math.min(6, Math.max(1, suggestion.maxSyllables))
+        : prev.maxSyllables,
+    avoidDictionaryWords: suggestion.avoidDictionaryWords ?? prev.avoidDictionaryWords,
+    avoidWords: mergedAvoidWords,
+    tlds: suggestion.tlds && suggestion.tlds.length > 0 ? suggestion.tlds : prev.tlds,
+    temperature:
+      suggestion.temperature != null && Number.isFinite(suggestion.temperature)
+        ? Math.min(1.2, Math.max(0.3, suggestion.temperature))
+        : prev.temperature,
+    count:
+      suggestion.count != null && Number.isFinite(suggestion.count)
+        ? Math.min(200, Math.max(50, suggestion.count))
+        : prev.count,
+    includePrefixVariants: suggestion.includePrefixVariants ?? prev.includePrefixVariants,
+    minPremiumTarget:
+      suggestion.minPremiumTarget != null && Number.isFinite(suggestion.minPremiumTarget)
+        ? Math.min(50, Math.max(0, suggestion.minPremiumTarget))
+        : prev.minPremiumTarget,
+    requireAllTlds: suggestion.requireAllTlds ?? prev.requireAllTlds,
+  };
+}
+
+// Lunour-style "feelings" — what should someone feel when they hear the name?
+// Source: Phase 1 discovery question in lunour-naming.skill.
+const VIBE_OPTIONS = [
+  {
+    value: "trust",
+    label: "Trust",
+    description: "Safe, credible, established. Sounds investors and finance leads instinctively believe.",
+  },
+  {
+    value: "delight",
+    label: "Delight",
+    description: "Joyful and light — a small smile on first hearing. Friendly without being silly.",
+  },
+  {
+    value: "power",
+    label: "Power",
+    description: "Confident, decisive, large in scale. Commands the room without shouting.",
+  },
+  {
+    value: "safety",
+    label: "Safety",
+    description: "Calm, protective, dependable. No edges, no friction.",
+  },
+  {
+    value: "curiosity",
+    label: "Curiosity",
+    description: "Intriguing and a touch unexpected — a name you want to repeat aloud.",
+  },
+  {
+    value: "calm",
+    label: "Calm",
+    description: "Peaceful, low-pressure, quiet. Open vowels, soft endings.",
+  },
+  {
+    value: "warmth",
+    label: "Warmth",
+    description: "Human, friendly, approachable. Feels said by a person, not a corporation.",
+  },
+  {
+    value: "precision",
+    label: "Precision",
+    description: "Exact, engineered, well-built. Suggests logic and craft without sounding cold.",
+  },
+  {
+    value: "mystery",
+    label: "Mystery",
+    description: "Evocative and a little unknown — leaves room for the brand's story to grow.",
+  },
+] as const;
+
+// Lunour naming archetypes (references/naming-types.md). Hover for definitions.
+const NAME_TYPE_OPTIONS = [
+  {
+    value: "evocative",
+    label: "Evocative",
+    description: "Names that conjure a feeling, not the literal product (Stripe, Notion, Loom, Figma).",
+  },
+  {
+    value: "invented",
+    label: "Invented",
+    description: "Coined words, portmanteaus, engineered sound. Highly ownable (Kodak, Spotify, Verizon).",
+  },
+  {
+    value: "metaphor",
+    label: "Metaphor",
+    description: "Borrowed from another domain to create resonance (Amazon, Apple, Ribbon, Firefly).",
+  },
+  {
+    value: "experiential",
+    label: "Experiential",
+    description: "Becomes a verb in everyday speech (Zoom, Uber, Google, Slack).",
+  },
+  {
+    value: "portmanteau",
+    label: "Portmanteau",
+    description: "Two meaningful words fused with one clear stress (Pinterest, Instagram, Microsoft).",
+  },
+  {
+    value: "abstract",
+    label: "Abstract",
+    description: "Pure designed sound with no inherent meaning — built up by branding (Accenture, Agilent).",
+  },
+  {
+    value: "place",
+    label: "Place",
+    description: "Borrows the feeling of a real or imagined location — scale, journey, landscape (Amazon, Patagonia, Atlassian).",
+  },
+  {
+    value: "descriptive",
+    label: "Descriptive",
+    description: "Says what the product does — easy to grasp, harder to trademark (Basecamp, Dropbox, Salesforce).",
+  },
+] as const;
+
 const DEFAULT_FORM: FormState = {
   description: "",
   referenceDomain: "",
   industry: "",
-  tone: "bold",
+  tone: ["trust"],
+  nameStyle: ["evocative"],
+  wordConstraint: "oneWord",
+  syllableConstraint: "any",
+  wordTypeConstraint: "invented",
   maxLength: 10,
   maxSyllables: 3,
   avoidDictionaryWords: true,
   avoidWords: "",
   tlds: ["com", "ai"],
-  temperature: 0.7,
-  count: 100,
+  temperature: 1.0,
+  count: 50,
   includePrefixVariants: false,
   minPremiumTarget: 5,
   requireAllTlds: false,
@@ -93,6 +303,200 @@ function fallbackLabel(id: string): string {
   return labels[id] ?? id;
 }
 
+function scoreBreakdownLabel(candidate: NameCandidate | SavedName): string {
+  const s = candidate.scoreBreakdown;
+  if (!s) return "";
+  return `B ${s.brandability} · P ${s.pronounceability} · L ${s.length} · AI ${s.aiVibe}`;
+}
+
+function styleLabel(nameStyle: string | undefined): string {
+  const key = (nameStyle ?? "evocative").toLowerCase().replace(/-/g, "");
+  const labels: Record<string, string> = {
+    evocative: "Evocative",
+    invented: "Invented",
+    metaphor: "Metaphor",
+    experiential: "Experiential",
+    portmanteau: "Portmanteau",
+    abstract: "Abstract",
+    place: "Place",
+    descriptive: "Descriptive",
+    // Backwards-compat aliases for previously saved searches.
+    moderntech: "Evocative",
+    futuristicai: "Invented",
+    brandable: "Invented",
+    professional: "Descriptive",
+  };
+  return labels[key] ?? "Evocative";
+}
+
+function parseToneOrStyleFromHistory(raw: string): string[] {
+  if (!raw?.trim()) return [];
+  const t = raw.trim();
+  if (t.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(t) as unknown;
+      if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) return parsed;
+    } catch {
+      /* fall through */
+    }
+  }
+  return [t];
+}
+
+function estimateInitialDurationMs(
+  form: FormState,
+  refine: boolean,
+): number {
+  const tldCount = Math.max(1, form.tlds.length);
+  const complexityScore =
+    9000 +
+    form.count * 130 +
+    tldCount * 2500 +
+    (form.referenceDomain.trim() ? 6000 : 0) +
+    (refine ? 7000 : 0) +
+    (form.requireAllTlds ? 4000 : 0) +
+    Math.min(10, form.minPremiumTarget) * 500;
+  return Math.min(Math.max(complexityScore, 12000), 180000);
+}
+
+function inferProgressRatio(
+  progressLog: string[],
+): number {
+  let ratio = 0.06;
+  for (const item of progressLog) {
+    const message = item.toLowerCase();
+    if (message.includes("starting")) ratio = Math.max(ratio, 0.08);
+    if (message.includes("analyzing reference domain")) ratio = Math.max(ratio, 0.14);
+    if (message.includes("generating first batch")) ratio = Math.max(ratio, 0.24);
+    if (
+      message.includes("generated") &&
+      message.includes("checking domain availability")
+    ) {
+      ratio = Math.max(ratio, 0.42);
+    }
+    if (message.includes("ranking and filtering")) ratio = Math.max(ratio, 0.62);
+    if (message.includes("low availability")) ratio = Math.max(ratio, 0.66);
+    if (message.includes("checking availability for second batch")) {
+      ratio = Math.max(ratio, 0.72);
+    }
+    if (
+      message.includes("refining for more") ||
+      message.includes("need more names with")
+    ) {
+      ratio = Math.max(ratio, 0.74);
+    }
+    if (message.includes("checking availability for refinement batch")) {
+      ratio = Math.max(ratio, 0.78);
+    }
+    if (message.includes("trying fallback")) ratio = Math.max(ratio, 0.72);
+    if (message.includes("last-resort run")) ratio = Math.max(ratio, 0.76);
+    if (message.includes("running quality ranking")) ratio = Math.max(ratio, 0.84);
+    if (message.includes("filtering by selected tlds")) ratio = Math.max(ratio, 0.93);
+  }
+  return Math.min(ratio, 0.96);
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  if (totalSeconds < 5) return "a few seconds";
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (seconds === 0) return `${minutes}m`;
+  return `${minutes}m ${seconds}s`;
+}
+
+function toneLabel(value: string): string {
+  return value
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function summarizeSuggestion(suggestion: ChatSuggestion): Array<{ label: string; value: string }> {
+  const deltas: Array<{ label: string; value: string }> = [];
+  if (suggestion.avoidWords && suggestion.avoidWords.length > 0) {
+    deltas.push({ label: "Avoid", value: suggestion.avoidWords.join(", ") });
+  }
+  if (suggestion.tone && suggestion.tone.length > 0) {
+    deltas.push({ label: "Tone", value: suggestion.tone.map(toneLabel).join(", ") });
+  }
+  if (suggestion.nameStyle && suggestion.nameStyle.length > 0) {
+    deltas.push({ label: "Archetype", value: suggestion.nameStyle.map(styleLabel).join(", ") });
+  }
+  if (suggestion.wordTypeConstraint) {
+    const map: Record<NonNullable<ChatSuggestion["wordTypeConstraint"]>, string> = {
+      invented: "Invented only",
+      mixed: "Mixed",
+      dictionary: "Dictionary words only",
+    };
+    deltas.push({ label: "Word type", value: map[suggestion.wordTypeConstraint] });
+  }
+  if (suggestion.wordConstraint) {
+    deltas.push({
+      label: "Words",
+      value: suggestion.wordConstraint === "oneWord" ? "1-word names" : "2-word names",
+    });
+  }
+  if (suggestion.syllableConstraint === "two") {
+    deltas.push({ label: "Syllables", value: "Exactly 2" });
+  }
+  if (suggestion.maxLength != null) {
+    deltas.push({ label: "Max length", value: String(suggestion.maxLength) });
+  }
+  if (suggestion.maxSyllables != null) {
+    deltas.push({ label: "Max syllables", value: String(suggestion.maxSyllables) });
+  }
+  if (suggestion.tlds && suggestion.tlds.length > 0) {
+    deltas.push({
+      label: "TLDs",
+      value: suggestion.tlds.map((tld) => `.${tld}`).join(", "),
+    });
+  }
+  if (suggestion.requireAllTlds === true) {
+    deltas.push({ label: "TLD rule", value: "Require all selected" });
+  }
+  if (suggestion.minPremiumTarget != null) {
+    deltas.push({ label: "Min .com/.ai target", value: String(suggestion.minPremiumTarget) });
+  }
+  if (suggestion.includePrefixVariants === true) {
+    deltas.push({ label: "Prefix variants", value: "Include get/try" });
+  }
+  if (suggestion.temperature != null) {
+    deltas.push({ label: "Temperature", value: suggestion.temperature.toFixed(2) });
+  }
+  if (suggestion.count != null) {
+    deltas.push({ label: "Count", value: String(suggestion.count) });
+  }
+  return deltas;
+}
+
+function historyQueryLabel(query: string): string {
+  const trimmed = query.trim();
+  return trimmed.length > 0 ? trimmed : "Untitled search";
+}
+
+function scoreTooltip(candidate: NameCandidate, activeStyle: string | string[]): string {
+  const s = candidate.scoreBreakdown;
+  if (!s) return "No score breakdown available.";
+  const dimensions: Array<{ key: string; value: number }> = [
+    { key: "Brandability", value: s.brandability },
+    { key: "Pronounceability", value: s.pronounceability },
+    { key: "Length fit", value: s.length },
+    { key: "AI vibe", value: s.aiVibe },
+  ];
+  const top = [...dimensions].sort((a, b) => b.value - a.value).slice(0, 2);
+  const styleLabels = Array.isArray(activeStyle)
+    ? activeStyle.map(styleLabel).join(", ")
+    : styleLabel(activeStyle);
+  return [
+    `Archetype: ${styleLabels}`,
+    `Top drivers: ${top.map((d) => `${d.key} (${d.value})`).join(", ")}`,
+    `Breakdown: Brandability ${s.brandability}, Pronounceability ${s.pronounceability}, Length ${s.length}, AI vibe ${s.aiVibe}`,
+  ].join("\n");
+}
+
 function toSavedItem(
   candidate: NameCandidate,
   meta: GenerateResponseBody["meta"] | null,
@@ -103,31 +507,216 @@ function toSavedItem(
     domains: candidate.domains,
     rationale: candidate.rationale,
     score: candidate.score,
+    scoreBreakdown: candidate.scoreBreakdown,
     summaryConclusion: meta?.summary,
     recommendationReason: rec?.reason,
   };
 }
 
+const AUTH_STATE_SNAPSHOT_KEY = "naming-lab-auth-snapshot-v1";
+
+interface AuthStateSnapshot {
+  form: FormState;
+  results: NameCandidate[];
+  meta: GenerateResponseBody["meta"] | null;
+  chatMessages: ChatMessage[];
+  searchHistory: SearchHistoryEntry[];
+  selectedHistoryId: string | null;
+  savedSearch: string;
+  selectedSavedId: string | null;
+}
+
+function isAuthRequiredError(error: unknown): boolean {
+  return (
+    error instanceof SavedNamesAuthRequiredError ||
+    error instanceof SearchHistoryAuthRequiredError ||
+    (error instanceof Error &&
+      /authentication required|not authenticated|401/i.test(error.message))
+  );
+}
+
 export default function Home(): React.JSX.Element {
   const [form, setForm] = useState<FormState>(DEFAULT_FORM);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userFirstName, setUserFirstName] = useState<string | null>(null);
   const [results, setResults] = useState<NameCandidate[]>([]);
   const [meta, setMeta] = useState<GenerateResponseBody["meta"] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [isRefining, setIsRefining] = useState(false);
-  const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [progressLog, setProgressLog] = useState<string[]>([]);
   const [savedNames, setSavedNames] = useState<SavedName[]>([]);
+  const [searchHistory, setSearchHistory] = useState<SearchHistoryEntry[]>([]);
   const [savedSearch, setSavedSearch] = useState("");
   const [selectedSavedId, setSelectedSavedId] = useState<string | null>(null);
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [savingStateError, setSavingStateError] = useState<string | null>(null);
+  const [suggestionTitle, setSuggestionTitle] = useState("");
+  const [suggestionDescription, setSuggestionDescription] = useState("");
+  const [suggestionSubmitting, setSuggestionSubmitting] = useState(false);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
+  const [suggestionIssue, setSuggestionIssue] = useState<{
+    identifier: string;
+    url: string;
+  } | null>(null);
+  const [feedbackAcknowledgements, setFeedbackAcknowledgements] = useState<
+    FeedbackImpactItem[]
+  >([]);
+  const [feedbackImpactHistory, setFeedbackImpactHistory] = useState<
+    FeedbackImpactItem[]
+  >([]);
+  const [feedbackImpactError, setFeedbackImpactError] = useState<string | null>(null);
+  const [runTiming, setRunTiming] = useState<{
+    startedAt: number;
+    baseEstimateMs: number;
+  } | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const abortControllerRef = useRef<AbortController | null>(null);
   const activityLogRef = useRef<HTMLDivElement | null>(null);
+  const resultsSectionRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollToResults = useCallback(() => {
+    resultsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  const persistAuthSnapshot = useCallback(() => {
+    if (typeof window === "undefined") return;
+    const snapshot: AuthStateSnapshot = {
+      form,
+      results,
+      meta,
+      chatMessages,
+      searchHistory,
+      selectedHistoryId,
+      savedSearch,
+      selectedSavedId,
+    };
+    try {
+      window.sessionStorage.setItem(
+        AUTH_STATE_SNAPSHOT_KEY,
+        JSON.stringify(snapshot),
+      );
+    } catch {
+      // ignore storage failures
+    }
+  }, [
+    form,
+    results,
+    meta,
+    chatMessages,
+    searchHistory,
+    selectedHistoryId,
+    savedSearch,
+    selectedSavedId,
+  ]);
+
+  const redirectToAuthWithSnapshot = useCallback(() => {
+    if (typeof window === "undefined") return;
+    persistAuthSnapshot();
+    const nextPath = `${window.location.pathname}${window.location.search}`;
+    window.location.assign(`/auth?next=${encodeURIComponent(nextPath)}`);
+  }, [persistAuthSnapshot]);
 
   useEffect(() => {
-    setSavedNames(getSavedNames());
+    if (typeof window === "undefined") return;
+    const raw = window.sessionStorage.getItem(AUTH_STATE_SNAPSHOT_KEY);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as AuthStateSnapshot;
+      if (parsed.form) setForm(parsed.form);
+      if (Array.isArray(parsed.results)) setResults(parsed.results);
+      if (parsed.meta) setMeta(parsed.meta);
+      if (Array.isArray(parsed.chatMessages)) setChatMessages(parsed.chatMessages);
+      if (Array.isArray(parsed.searchHistory)) setSearchHistory(parsed.searchHistory);
+      if (typeof parsed.savedSearch === "string") setSavedSearch(parsed.savedSearch);
+      if (typeof parsed.selectedSavedId === "string" || parsed.selectedSavedId === null) {
+        setSelectedSavedId(parsed.selectedSavedId);
+      }
+      if (
+        typeof parsed.selectedHistoryId === "string" ||
+        parsed.selectedHistoryId === null
+      ) {
+        setSelectedHistoryId(parsed.selectedHistoryId);
+      }
+    } catch {
+      // ignore malformed snapshot
+    } finally {
+      window.sessionStorage.removeItem(AUTH_STATE_SNAPSHOT_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadAccountData = async (): Promise<void> => {
+      try {
+        setSavingStateError(null);
+        const userResponse = await fetch("/api/auth/user", { cache: "no-store" });
+        if (!userResponse.ok) {
+          if (!cancelled) {
+            setIsAuthenticated(false);
+            setUserEmail(null);
+            setUserFirstName(null);
+          }
+          return;
+        }
+
+        const payload = (await userResponse.json()) as {
+          user?: {
+            email?: string | null;
+            firstName?: string | null;
+            fullName?: string | null;
+          };
+        };
+
+        const [saved, history] = await Promise.all([
+          fetchSavedNames(),
+          fetchSearchHistory(),
+        ]);
+
+        if (cancelled) return;
+        setIsAuthenticated(true);
+        setUserEmail(payload.user?.email ?? null);
+        setUserFirstName(payload.user?.firstName ?? null);
+        setSavedNames(saved);
+        setSearchHistory(history);
+        try {
+          const feedbackImpact = await fetchFeedbackImpact();
+          if (!cancelled) {
+            setFeedbackAcknowledgements(feedbackImpact.activeAcknowledgements);
+            setFeedbackImpactHistory(feedbackImpact.history);
+            setFeedbackImpactError(null);
+          }
+        } catch (feedbackError) {
+          if (!cancelled) {
+            const message =
+              feedbackError instanceof Error
+                ? feedbackError.message
+                : "Unable to load feedback impact.";
+            setFeedbackImpactError(message);
+          }
+        }
+      } catch (loadError) {
+        if (cancelled) return;
+        if (isAuthRequiredError(loadError)) {
+          setIsAuthenticated(false);
+          setUserEmail(null);
+          setUserFirstName(null);
+          return;
+        }
+        const message =
+          loadError instanceof Error ? loadError.message : "Unable to load your account data.";
+        setSavingStateError(message);
+      }
+    };
+    void loadAccountData();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -135,6 +724,18 @@ export default function Home(): React.JSX.Element {
       activityLogRef.current.scrollTop = activityLogRef.current.scrollHeight;
     }
   }, [progressLog]);
+
+  useEffect(() => {
+    if (!loading || !runTiming) {
+      setElapsedMs(0);
+      return;
+    }
+    setElapsedMs(Date.now() - runTiming.startedAt);
+    const interval = window.setInterval(() => {
+      setElapsedMs(Date.now() - runTiming.startedAt);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [loading, runTiming]);
 
   const availableCount = useMemo(
     () =>
@@ -162,25 +763,275 @@ export default function Home(): React.JSX.Element {
     [savedNames, selectedSavedId],
   );
 
-  const handleSaveOne = useCallback(
-    (candidate: NameCandidate) => {
-      const item = addSavedName(toSavedItem(candidate, meta));
-      setSavedNames((prev) => [item, ...prev]);
-      setSelectedSavedId(item.id);
-    },
-    [meta],
+  const avoidWordList = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          form.avoidWords
+            .split(",")
+            .map((word) => word.trim())
+            .filter(Boolean),
+        ),
+      ),
+    [form.avoidWords],
   );
 
-  const handleSaveAll = useCallback(() => {
-    addSavedNames(results.map((c) => toSavedItem(c, meta)));
-    setSavedNames(() => getSavedNames());
-  }, [results, meta]);
+  const removeAvoidWord = useCallback((word: string): void => {
+    const target = word.trim().toLowerCase();
+    if (!target) return;
+    setForm((prev) => {
+      const remaining = prev.avoidWords
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .filter((value) => value.toLowerCase() !== target);
+      return { ...prev, avoidWords: remaining.join(", ") };
+    });
+  }, []);
 
-  const handleRemoveSaved = useCallback((id: string) => {
-    removeSavedName(id);
-    setSavedNames(() => getSavedNames());
-    if (selectedSavedId === id) setSelectedSavedId(null);
-  }, [selectedSavedId]);
+  const clearAvoidWords = useCallback((): void => {
+    setForm((prev) => ({ ...prev, avoidWords: "" }));
+  }, []);
+
+  const eta = useMemo(() => {
+    if (!loading || !runTiming) return null;
+    const progressRatio = inferProgressRatio(progressLog);
+    const projectedTotalMs = Math.max(
+      runTiming.baseEstimateMs,
+      elapsedMs / Math.max(progressRatio, 0.08),
+    );
+    const remainingMs = Math.max(0, projectedTotalMs - elapsedMs);
+    return {
+      progressRatio,
+      remainingLabel: formatDuration(remainingMs),
+      elapsedLabel: formatDuration(elapsedMs),
+    };
+  }, [loading, runTiming, progressLog, elapsedMs]);
+
+  const handleSaveOne = useCallback(
+    async (candidate: NameCandidate) => {
+      if (!isAuthenticated) {
+        setSavingStateError("Sign in to save names. Redirecting to login...");
+        redirectToAuthWithSnapshot();
+        return;
+      }
+      try {
+        setSavingStateError(null);
+        const item = await createSavedName(toSavedItem(candidate, meta));
+        setSavedNames((prev) => [item, ...prev]);
+        setSelectedSavedId(item.id);
+      } catch (saveError) {
+        if (isAuthRequiredError(saveError)) {
+          setIsAuthenticated(false);
+          setUserEmail(null);
+          setUserFirstName(null);
+          setSavingStateError("Session expired. Redirecting to login...");
+          redirectToAuthWithSnapshot();
+          return;
+        }
+        const message =
+          saveError instanceof Error ? saveError.message : "Unable to save this name.";
+        setSavingStateError(message);
+      }
+    },
+    [isAuthenticated, meta, redirectToAuthWithSnapshot],
+  );
+
+  const handleSaveAll = useCallback(async () => {
+    if (!isAuthenticated) {
+      setSavingStateError("Sign in to save names. Redirecting to login...");
+      redirectToAuthWithSnapshot();
+      return;
+    }
+    try {
+      setSavingStateError(null);
+      const created = await createSavedNames(results.map((c) => toSavedItem(c, meta)));
+      setSavedNames((prev) => [...created, ...prev]);
+    } catch (saveError) {
+      if (isAuthRequiredError(saveError)) {
+        setIsAuthenticated(false);
+        setUserEmail(null);
+        setUserFirstName(null);
+        setSavingStateError("Session expired. Redirecting to login...");
+        redirectToAuthWithSnapshot();
+        return;
+      }
+      const message =
+        saveError instanceof Error ? saveError.message : "Unable to save names.";
+      setSavingStateError(message);
+    }
+  }, [isAuthenticated, meta, redirectToAuthWithSnapshot, results]);
+
+  const handleRemoveSaved = useCallback(async (id: string) => {
+    if (!isAuthenticated) return;
+    try {
+      setSavingStateError(null);
+      await deleteSavedName(id);
+      setSavedNames((prev) => prev.filter((item) => item.id !== id));
+      if (selectedSavedId === id) setSelectedSavedId(null);
+    } catch (removeError) {
+      if (isAuthRequiredError(removeError)) {
+        setIsAuthenticated(false);
+        setUserEmail(null);
+        setUserFirstName(null);
+        setSavingStateError("Session expired. Redirecting to login...");
+        redirectToAuthWithSnapshot();
+        return;
+      }
+      const message =
+        removeError instanceof Error ? removeError.message : "Unable to remove saved name.";
+      setSavingStateError(message);
+    }
+  }, [isAuthenticated, redirectToAuthWithSnapshot, selectedSavedId]);
+
+  const handleRestoreHistory = useCallback((entry: SearchHistoryEntry) => {
+    setSelectedHistoryId(entry.id);
+    setResults(entry.names);
+    setMeta(entry.meta);
+    setError(null);
+    setProgressLog([]);
+    setChatMessages([]);
+    setForm((prev) => ({
+      ...prev,
+      description: entry.query || prev.description,
+      tone: parseToneOrStyleFromHistory(entry.tone).length > 0 ? parseToneOrStyleFromHistory(entry.tone) : prev.tone,
+      nameStyle: parseToneOrStyleFromHistory(entry.nameStyle).length > 0 ? parseToneOrStyleFromHistory(entry.nameStyle) : prev.nameStyle,
+      tlds: entry.tlds.length > 0 ? entry.tlds : prev.tlds,
+    }));
+  }, []);
+
+  const handleRemoveHistory = useCallback(async (id: string) => {
+    if (!isAuthenticated) {
+      setSearchHistory((prev) => {
+        const next = prev.filter((entry) => entry.id !== id);
+        if (selectedHistoryId === id) {
+          setSelectedHistoryId(next[0]?.id ?? null);
+        }
+        return next;
+      });
+      return;
+    }
+    try {
+      setSavingStateError(null);
+      await deleteSearchHistoryEntry(id);
+      setSearchHistory((prev) => {
+        const next = prev.filter((entry) => entry.id !== id);
+        if (selectedHistoryId === id) {
+          setSelectedHistoryId(next[0]?.id ?? null);
+        }
+        return next;
+      });
+    } catch (removeError) {
+      if (isAuthRequiredError(removeError)) {
+        setIsAuthenticated(false);
+        setUserEmail(null);
+        setUserFirstName(null);
+        setSavingStateError("Session expired. Redirecting to login...");
+        redirectToAuthWithSnapshot();
+        return;
+      }
+      const message =
+        removeError instanceof Error ? removeError.message : "Unable to remove history item.";
+      setSavingStateError(message);
+    }
+  }, [isAuthenticated, redirectToAuthWithSnapshot, selectedHistoryId]);
+
+  const handleClearHistory = useCallback(async () => {
+    if (!isAuthenticated) {
+      setSearchHistory([]);
+      setSelectedHistoryId(null);
+      return;
+    }
+    try {
+      setSavingStateError(null);
+      await clearSearchHistoryEntries();
+      setSearchHistory([]);
+      setSelectedHistoryId(null);
+    } catch (clearError) {
+      if (isAuthRequiredError(clearError)) {
+        setIsAuthenticated(false);
+        setUserEmail(null);
+        setUserFirstName(null);
+        setSavingStateError("Session expired. Redirecting to login...");
+        redirectToAuthWithSnapshot();
+        return;
+      }
+      const message =
+        clearError instanceof Error ? clearError.message : "Unable to clear history.";
+      setSavingStateError(message);
+    }
+  }, [isAuthenticated, redirectToAuthWithSnapshot]);
+
+  const handleSignOut = useCallback(async () => {
+    if (!isAuthenticated) {
+      redirectToAuthWithSnapshot();
+      return;
+    }
+    try {
+      await fetch("/api/auth/signout", { method: "POST" });
+    } finally {
+      window.location.assign("/auth");
+    }
+  }, [isAuthenticated, redirectToAuthWithSnapshot]);
+
+  const handleSubmitSuggestion = useCallback(async () => {
+    const title = suggestionTitle.trim();
+    const description = suggestionDescription.trim();
+
+    if (!title || !description || suggestionSubmitting) return;
+
+    try {
+      setSuggestionSubmitting(true);
+      setSuggestionError(null);
+      setSuggestionIssue(null);
+      const issue = await submitSuggestion({ title, description });
+      setSuggestionIssue({ identifier: issue.identifier, url: issue.url });
+      setSuggestionTitle("");
+      setSuggestionDescription("");
+    } catch (submitError) {
+      const message =
+        submitError instanceof Error
+          ? submitError.message
+          : "Unable to send suggestion.";
+      setSuggestionError(message);
+    } finally {
+      setSuggestionSubmitting(false);
+    }
+  }, [suggestionTitle, suggestionDescription, suggestionSubmitting]);
+
+  const handleDismissFeedbackAcknowledgement = useCallback(
+    async (feedbackId: string) => {
+      try {
+        await dismissFeedbackAcknowledgement(feedbackId);
+        setFeedbackAcknowledgements((prev) =>
+          prev.filter((item) => item.id !== feedbackId),
+        );
+      } catch (dismissError) {
+        const message =
+          dismissError instanceof Error
+            ? dismissError.message
+            : "Unable to dismiss feedback acknowledgement.";
+        setFeedbackImpactError(message);
+      }
+    },
+    [],
+  );
+
+  const suggestionCtaName = useMemo(() => {
+    const explicitFirstName = userFirstName?.trim();
+    if (explicitFirstName) return explicitFirstName;
+
+    const localPart = userEmail?.split("@")[0]?.trim();
+    if (!localPart) return null;
+
+    const normalized = localPart.replace(/[._-]+/g, " ").trim();
+    if (!normalized) return null;
+    return normalized
+      .split(" ")
+      .filter(Boolean)
+      .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+      .join(" ");
+  }, [userFirstName, userEmail]);
 
   const sendChat = async (): Promise<void> => {
     const msg = chatInput.trim();
@@ -195,15 +1046,45 @@ export default function Home(): React.JSX.Element {
         body: JSON.stringify({
           names: results,
           message: msg,
-          history: chatMessages,
+          history: chatMessages.map(({ role, content }) => ({ role, content })),
+          currentForm: {
+            description: form.description,
+            referenceDomain: form.referenceDomain,
+            industry: form.industry,
+            tone: form.tone,
+            nameStyle: form.nameStyle,
+            wordConstraint: form.wordConstraint,
+            syllableConstraint: form.syllableConstraint,
+            wordTypeConstraint: form.wordTypeConstraint,
+            maxLength: form.maxLength,
+            maxSyllables: form.maxSyllables,
+            avoidDictionaryWords: form.avoidDictionaryWords,
+            avoidWords: form.avoidWords,
+            tlds: form.tlds,
+            temperature: form.temperature,
+            count: form.count,
+            includePrefixVariants: form.includePrefixVariants,
+            minPremiumTarget: form.minPremiumTarget,
+            requireAllTlds: form.requireAllTlds,
+          },
         }),
       });
       if (!response.ok) {
         const payload = (await response.json()) as { error?: string };
         throw new Error(payload.error ?? "Chat failed.");
       }
-      const payload = (await response.json()) as { reply: string };
-      setChatMessages((prev) => [...prev, { role: "assistant", content: payload.reply }]);
+      const payload = (await response.json()) as {
+        reply: string;
+        suggestion?: ChatSuggestion | null;
+      };
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: payload.reply,
+          suggestion: payload.suggestion ?? null,
+        },
+      ]);
     } catch (e) {
       const message = e instanceof Error ? e.message : "Chat failed.";
       setChatMessages((prev) => [...prev, { role: "assistant", content: `Error: ${message}` }]);
@@ -211,6 +1092,19 @@ export default function Home(): React.JSX.Element {
       setChatLoading(false);
     }
   };
+
+  const applyChatSuggestion = useCallback(
+    (suggestion: ChatSuggestion, options: { run?: boolean } = {}): void => {
+      const merged = mergeFormWithSuggestion(form, suggestion);
+      setForm(merged);
+      if (options.run) {
+        void submit(false, merged);
+      }
+    },
+    // `submit` is declared below; safe because it's stable via closure access.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [form],
+  );
 
   const onTldToggle = (tld: string, checked: boolean): void => {
     setForm((prev) => {
@@ -228,9 +1122,15 @@ export default function Home(): React.JSX.Element {
     abortControllerRef.current?.abort();
   };
 
-  const submit = async (refine: boolean): Promise<void> => {
+  const submit = async (refine: boolean, formOverride?: FormState): Promise<void> => {
+    const formToUse = formOverride ?? form;
+    const startedAt = Date.now();
     setError(null);
     setProgressLog([]);
+    setRunTiming({
+      startedAt,
+      baseEstimateMs: estimateInitialDurationMs(formToUse, refine),
+    });
     abortControllerRef.current?.abort();
     abortControllerRef.current = new AbortController();
     const signal = abortControllerRef.current.signal;
@@ -243,23 +1143,27 @@ export default function Home(): React.JSX.Element {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          description: form.description,
-          referenceDomain: form.referenceDomain.trim() || undefined,
-          industry: form.industry || undefined,
-          tone: form.tone || undefined,
-          maxLength: form.maxLength,
-          maxSyllables: form.maxSyllables,
-          avoidDictionaryWords: form.avoidDictionaryWords,
-          avoidWords: form.avoidWords
+          description: formToUse.description,
+          referenceDomain: formToUse.referenceDomain.trim() || undefined,
+          industry: formToUse.industry || undefined,
+          tone: formToUse.tone.length > 0 ? formToUse.tone : undefined,
+          nameStyle: formToUse.nameStyle.length > 0 ? formToUse.nameStyle : undefined,
+          wordConstraint: formToUse.wordConstraint,
+          syllableConstraint: formToUse.syllableConstraint,
+          wordTypeConstraint: formToUse.wordTypeConstraint,
+          maxLength: formToUse.maxLength,
+          maxSyllables: formToUse.maxSyllables,
+          avoidDictionaryWords: formToUse.avoidDictionaryWords,
+          avoidWords: formToUse.avoidWords
             .split(",")
             .map((value) => value.trim())
             .filter(Boolean),
-          tlds: form.tlds,
-          temperature: form.temperature,
-          count: form.count,
-          includePrefixVariants: form.includePrefixVariants,
-          minPremiumTarget: form.minPremiumTarget,
-          requireAllTlds: form.requireAllTlds,
+          tlds: formToUse.tlds,
+          temperature: formToUse.temperature,
+          count: formToUse.count,
+          includePrefixVariants: formToUse.includePrefixVariants,
+          minPremiumTarget: formToUse.minPremiumTarget,
+          requireAllTlds: formToUse.requireAllTlds,
           refineFrom: refine
             ? {
                 namesWithAvailability: toRefinementInput(results),
@@ -299,6 +1203,50 @@ export default function Home(): React.JSX.Element {
                 setResults(data.result.names);
                 setMeta(data.result.meta);
                 setChatMessages([]);
+                const availableInRun = data.result.names.reduce(
+                  (acc, candidate) =>
+                    acc + candidate.domains.filter((domain) => domain.available).length,
+                  0,
+                );
+                const historyPayload = {
+                  query: formToUse.description.trim(),
+                  tone: JSON.stringify(formToUse.tone),
+                  nameStyle: JSON.stringify(formToUse.nameStyle),
+                  tlds: [...formToUse.tlds],
+                  refined: refine,
+                  resultCount: data.result.names.length,
+                  availableCount: availableInRun,
+                  names: data.result.names,
+                  meta: data.result.meta,
+                };
+
+                if (!isAuthenticated) {
+                  const localEntry: SearchHistoryEntry = {
+                    ...historyPayload,
+                    id: `temp-${crypto.randomUUID()}`,
+                    createdAt: new Date().toISOString(),
+                  };
+                  setSearchHistory((prev) => [localEntry, ...prev].slice(0, 25));
+                  setSelectedHistoryId(localEntry.id);
+                } else {
+                  try {
+                    const historyEntry = await createSearchHistoryEntry(historyPayload);
+                    setSearchHistory((prev) => [historyEntry, ...prev].slice(0, 25));
+                    setSelectedHistoryId(historyEntry.id);
+                  } catch (historyError) {
+                    if (isAuthRequiredError(historyError)) {
+                      setIsAuthenticated(false);
+                      setUserEmail(null);
+                      setUserFirstName(null);
+                    } else {
+                      const message =
+                        historyError instanceof Error
+                          ? historyError.message
+                          : "Unable to persist search history.";
+                      setSavingStateError(message);
+                    }
+                  }
+                }
               } else if (data.type === "error" && typeof data.error === "string") {
                 setError(data.error);
               }
@@ -321,6 +1269,7 @@ export default function Home(): React.JSX.Element {
     } finally {
       setLoading(false);
       setIsRefining(false);
+      setRunTiming(null);
       abortControllerRef.current = null;
     }
   };
@@ -337,8 +1286,28 @@ export default function Home(): React.JSX.Element {
               </div>
               <span className="font-semibold text-foreground">Naming Lab</span>
             </div>
-            <ThemeToggle />
+            <div className="flex items-center gap-1">
+              <ThemeToggle />
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2 text-xs"
+                onClick={handleSignOut}
+              >
+                {isAuthenticated ? "Sign out" : "Sign in"}
+              </Button>
+            </div>
           </div>
+          {userEmail ? (
+            <p className="mt-2 truncate text-xs text-muted-foreground">
+              Signed in as {userEmail}
+            </p>
+          ) : (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Browse freely. Sign in when you want to save.
+            </p>
+          )}
           <p className="mt-3 text-xs text-muted-foreground">Saved names</p>
           <Input
             type="search"
@@ -371,22 +1340,166 @@ export default function Home(): React.JSX.Element {
             </ul>
           )}
         </nav>
+        <div className="border-t border-border p-2">
+          <div className="mb-1 flex items-center justify-between gap-2 px-1">
+            <p className="text-xs text-muted-foreground">Search history</p>
+            {searchHistory.length > 0 ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={handleClearHistory}
+              >
+                Clear
+              </Button>
+            ) : null}
+          </div>
+          {searchHistory.length === 0 ? (
+            <p className="px-1 py-2 text-xs text-muted-foreground">
+              No previous searches yet.
+            </p>
+          ) : (
+            <ul className="space-y-0.5">
+              {searchHistory.map((entry) => (
+                <li key={entry.id}>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      type="button"
+                      variant={selectedHistoryId === entry.id ? "secondary" : "ghost"}
+                      className="min-w-0 flex-1 justify-start px-2"
+                      onClick={() => handleRestoreHistory(entry)}
+                    >
+                      <div className="min-w-0 text-left">
+                        <p className="truncate text-xs font-medium">
+                          {historyQueryLabel(entry.query)}
+                        </p>
+                        <p className="truncate text-[11px] text-muted-foreground">
+                          {entry.resultCount} names, {entry.availableCount} available
+                        </p>
+                      </div>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-7 shrink-0"
+                      onClick={() => handleRemoveHistory(entry.id)}
+                      title="Remove history item"
+                      aria-label="Remove history item"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="border-t border-border p-3">
+          <p className="text-sm font-semibold text-foreground">
+            {suggestionCtaName ? `Hi ${suggestionCtaName} - got feedback?` : "Got feedback?"}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Share one idea or pain point. We read every note and use it to improve the product.
+          </p>
+          {feedbackAcknowledgements[0] ? (
+            <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50/70 p-2 dark:border-emerald-900 dark:bg-emerald-950/30">
+              <p className="text-xs text-emerald-900 dark:text-emerald-200">
+                Thanks - we fixed an issue based on your feedback.
+              </p>
+              <p className="mt-1 truncate text-xs text-emerald-800 dark:text-emerald-300">
+                &quot;{feedbackAcknowledgements[0].title}&quot;
+              </p>
+              <div className="mt-1 flex items-center gap-2">
+                {feedbackAcknowledgements[0].linearIssueUrl &&
+                feedbackAcknowledgements[0].linearIssueIdentifier ? (
+                  <a
+                    href={feedbackAcknowledgements[0].linearIssueUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[11px] text-emerald-700 underline underline-offset-2 dark:text-emerald-300"
+                  >
+                    {feedbackAcknowledgements[0].linearIssueIdentifier}
+                  </a>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-[11px] text-emerald-700 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200"
+                  onClick={() =>
+                    handleDismissFeedbackAcknowledgement(feedbackAcknowledgements[0].id)
+                  }
+                >
+                  Dismiss
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          <Input
+            value={suggestionTitle}
+            onChange={(event) => setSuggestionTitle(event.target.value)}
+            placeholder="Short title"
+            className="mt-2 h-8 text-xs"
+            maxLength={120}
+          />
+          <Textarea
+            value={suggestionDescription}
+            onChange={(event) => setSuggestionDescription(event.target.value)}
+            placeholder="What should we improve?"
+            className="mt-2 min-h-[84px] text-xs"
+            maxLength={4000}
+          />
+          <Button
+            type="button"
+            size="sm"
+            className="mt-2 w-full"
+            disabled={
+              suggestionSubmitting ||
+              !suggestionTitle.trim() ||
+              !suggestionDescription.trim()
+            }
+            onClick={handleSubmitSuggestion}
+          >
+            {suggestionSubmitting ? "Sending..." : "Send feedback"}
+          </Button>
+          {suggestionError ? (
+            <p className="mt-2 text-xs text-destructive">{suggestionError}</p>
+          ) : null}
+          {suggestionIssue ? (
+            <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">
+              Thanks - your feedback has been sent.
+            </p>
+          ) : null}
+          {feedbackImpactError ? (
+            <p className="mt-2 text-xs text-destructive">{feedbackImpactError}</p>
+          ) : null}
+          {feedbackImpactHistory.length > 0 ? (
+            <div className="mt-3 border-t border-border pt-2">
+              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Your feedback helped improve the product
+              </p>
+              <ul className="mt-1 space-y-1">
+                {feedbackImpactHistory.slice(0, 3).map((item) => (
+                  <li key={item.id} className="text-[11px] text-muted-foreground">
+                    {item.issueStatus === "fixed" ? "Fixed" : "Closed"}:{" "}
+                    <span className="text-foreground">{item.title}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
       </aside>
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        {/* Hero strip */}
-        <div className="border-b border-border/60 bg-gradient-to-b from-muted/40 to-transparent px-6 py-10 md:py-14">
-          <div className="mx-auto max-w-3xl text-center">
-            <h1 className="text-3xl font-bold tracking-tight text-foreground md:text-4xl">
-              AI-powered brand names
-            </h1>
-            <p className="mt-2 text-muted-foreground md:text-lg">
-              Describe your product. Get domain-ready names and live availability in one go.
-            </p>
-          </div>
+      {/* Form panel */}
+      <div className="flex w-[400px] shrink-0 flex-col border-r border-border overflow-y-auto">
+        <div className="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur-sm px-4 py-3">
+          <h2 className="font-semibold text-foreground">Name generator</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">Describe your product, get domain-ready brand names.</p>
         </div>
-
-        <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-8 px-6 py-8">
+        <div className="flex flex-col gap-4 p-4">
       {/* Selected saved name detail */}
       {selectedSaved ? (
         <Card>
@@ -410,7 +1523,7 @@ export default function Home(): React.JSX.Element {
                   const isPremium = Boolean(d.premium);
                   const variant = d.available
                     ? isPremium
-                      ? "secondary"
+                      ? "premium"
                       : "default"
                     : "outline";
                   return (
@@ -422,7 +1535,12 @@ export default function Home(): React.JSX.Element {
                   );
                 })}
               </div>
-              <p className="text-xs text-muted-foreground">Score: {selectedSaved.score} · Saved {new Date(selectedSaved.savedAt).toLocaleString()}</p>
+              <p className="text-xs text-muted-foreground">
+                Score: {selectedSaved.score}
+                {selectedSaved.scoreBreakdown ? ` (${scoreBreakdownLabel(selectedSaved)})` : ""}
+                {" · "}
+                Saved {new Date(selectedSaved.savedAt).toLocaleString()}
+              </p>
             </div>
             <Button
               type="button"
@@ -456,34 +1574,29 @@ export default function Home(): React.JSX.Element {
               placeholder="e.g. A calm, premium app for tracking habits. Audience: busy professionals who want simplicity."
               className="mt-2 min-h-[120px] resize-y border-0 bg-muted/40 text-base placeholder:text-muted-foreground focus-visible:ring-2 md:min-h-[100px]"
             />
-            <div className="mt-6 flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-muted-foreground">Tone:</span>
-                <Select
-                  value={form.tone}
-                  onValueChange={(value) =>
-                    setForm((prev) => ({ ...prev, tone: value ?? prev.tone }))
-                  }
-                >
-                  <SelectTrigger className="w-[140px]">
-                    <SelectValue placeholder="Tone" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="bold">Bold</SelectItem>
-                    <SelectItem value="technical">Technical</SelectItem>
-                    <SelectItem value="playful">Playful</SelectItem>
-                    <SelectItem value="premium">Premium</SelectItem>
-                    <SelectItem value="professional">Professional</SelectItem>
-                    <SelectItem value="modern">Modern</SelectItem>
-                    <SelectItem value="minimal">Minimal</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+            <div className="mt-6 flex flex-col gap-4">
+              <BubbleSelect
+                label="Feeling:"
+                title="What should someone feel when they hear the name? Pick one or more — hover each chip for a definition."
+                options={VIBE_OPTIONS}
+                value={form.tone}
+                onChange={(value) => setForm((prev) => ({ ...prev, tone: value }))}
+                minSelection={1}
+              />
+              <BubbleSelect
+                label="Archetype:"
+                title="Lunour naming archetypes — pick one or more to weight the batch. Hover each chip for examples."
+                options={NAME_TYPE_OPTIONS}
+                value={form.nameStyle}
+                onChange={(value) => setForm((prev) => ({ ...prev, nameStyle: value }))}
+                minSelection={1}
+              />
+              <div className="flex flex-wrap items-center gap-3">
               <Button
                 size="lg"
                 onClick={() => (loading && !isRefining ? stopGenerating() : submit(false))}
                 disabled={!loading && (!form.description.trim() || form.tlds.length === 0)}
-                className="gap-2"
+                className="gap-2 border-2 border-primary-foreground/45 shadow-sm"
               >
                 {loading && !isRefining ? (
                   <>
@@ -513,12 +1626,20 @@ export default function Home(): React.JSX.Element {
                   "Refine from results"
                 )}
               </Button>
+              </div>
             </div>
           </div>
 
           {loading ? (
             <div className="border-t border-border px-6 py-4">
-              <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">Activity</p>
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Activity</p>
+                {eta ? (
+                  <p className="text-xs text-muted-foreground">
+                    Est. remaining: {eta.remainingLabel} ({Math.round(eta.progressRatio * 100)}% complete, {eta.elapsedLabel} elapsed)
+                  </p>
+                ) : null}
+              </div>
               <div
                 ref={activityLogRef}
                 className="activity-log max-h-40 overflow-y-auto overflow-x-hidden font-mono text-sm"
@@ -526,11 +1647,17 @@ export default function Home(): React.JSX.Element {
                 {progressLog.length === 0 ? (
                   <div className="py-0.5 text-muted-foreground">Preparing…</div>
                 ) : (
-                  progressLog.map((msg, i) => (
-                    <div key={i} className="py-0.5">
-                      {msg}
-                    </div>
-                  ))
+                  progressLog.map((msg, i) => {
+                    const isActive = i === progressLog.length - 1;
+                    return (
+                      <div
+                        key={i}
+                        className={`py-0.5 ${isActive ? "text-chart-1 font-medium animate-pulse" : "text-muted-foreground"}`}
+                      >
+                        {isActive ? "▸ " : ""}{msg}
+                      </div>
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -601,6 +1728,74 @@ export default function Home(): React.JSX.Element {
                 }))
               }
             />
+          </div>
+
+          <div className="space-y-2">
+            <Label>Word constraint</Label>
+            <Select
+              value={form.wordConstraint}
+              onValueChange={(value) =>
+                setForm((prev) => ({
+                  ...prev,
+                  wordConstraint: (value as FormState["wordConstraint"]) ?? prev.wordConstraint,
+                }))
+              }
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Word constraint" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="oneWord">1-word</SelectItem>
+                <SelectItem value="twoWord">2-word</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Syllable constraint</Label>
+            <Select
+              value={form.syllableConstraint}
+              onValueChange={(value) =>
+                setForm((prev) => ({
+                  ...prev,
+                  syllableConstraint:
+                    (value as FormState["syllableConstraint"]) ?? prev.syllableConstraint,
+                }))
+              }
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Syllable constraint" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="any">Any</SelectItem>
+                <SelectItem value="two">Exactly 2 syllables</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Word type</Label>
+            <Select
+              value={form.wordTypeConstraint}
+              onValueChange={(value) => {
+                const next = (value as FormState["wordTypeConstraint"]) ?? form.wordTypeConstraint;
+                setForm((prev) => ({
+                  ...prev,
+                  wordTypeConstraint: next,
+                  avoidDictionaryWords: next === "invented",
+                }));
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Word type" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="invented">Invented only (no dictionary words)</SelectItem>
+                <SelectItem value="mixed">Mixed (invented + dictionary-inspired OK)</SelectItem>
+                <SelectItem value="dictionary">Dictionary words only (real English words)</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">Invented = coined names; Mixed = either; Dictionary = real recognizable words only.</p>
           </div>
 
           <div className="space-y-2">
@@ -680,18 +1875,6 @@ export default function Home(): React.JSX.Element {
           </label>
           <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
             <Checkbox
-              checked={form.avoidDictionaryWords}
-              onCheckedChange={(checked) =>
-                setForm((prev) => ({
-                  ...prev,
-                  avoidDictionaryWords: checked === true,
-                }))
-              }
-            />
-            Avoid dictionary words
-          </label>
-          <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
-            <Checkbox
               checked={form.includePrefixVariants}
               onCheckedChange={(checked) =>
                 setForm((prev) => ({
@@ -726,9 +1909,20 @@ export default function Home(): React.JSX.Element {
               <p className="text-sm text-destructive">{error}</p>
             </div>
           ) : null}
+          {savingStateError ? (
+            <div className="border-t border-border px-6 py-4">
+              <p className="text-sm text-destructive">{savingStateError}</p>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
+        </div>
+      </div>
 
+      {/* Results panel */}
+      <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+        <div className="flex flex-col gap-6 p-6">
+      <div ref={resultsSectionRef}>
       <Card>
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-4 space-y-0">
           <CardTitle>Results</CardTitle>
@@ -747,7 +1941,179 @@ export default function Home(): React.JSX.Element {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-        {meta && meta.generatedCount > 0 && results.length === 0 && !meta.relaxedTldFilter ? (
+        {results.length > 0 ? (
+          <div className="rounded-lg border border-border bg-muted/20 p-4">
+            <div className="flex flex-wrap gap-2">
+              <Input
+                type="search"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && sendChat()}
+                placeholder='Ask or steer (e.g. "which sounds like Lume?", "avoid words like cloud and data", "no dictionary words")'
+                disabled={chatLoading}
+                className="min-w-[240px] flex-1"
+                aria-label="Ask about generated results"
+              />
+              <Button
+                type="button"
+                onClick={sendChat}
+                disabled={chatLoading || !chatInput.trim()}
+              >
+                {chatLoading ? "Searching..." : "Ask"}
+              </Button>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Searches all generated names and domain statuses for this run. Use phrases like
+              {" "}
+              <span className="text-foreground">&quot;avoid X&quot;</span>,{" "}
+              <span className="text-foreground">&quot;no dictionary words&quot;</span>, or{" "}
+              <span className="text-foreground">&quot;don&apos;t want anything like vello&quot;</span>{" "}
+              and the next run will honor it.
+            </p>
+            {avoidWordList.length > 0 ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-amber-200 bg-amber-50/60 p-2 dark:border-amber-900 dark:bg-amber-950/20">
+                <span className="text-xs font-medium uppercase tracking-wider text-amber-900 dark:text-amber-200">
+                  Avoiding
+                </span>
+                {avoidWordList.map((word) => (
+                  <span
+                    key={word}
+                    className="inline-flex items-center gap-1 rounded-full border border-amber-300/80 bg-background px-2 py-0.5 font-mono text-xs text-foreground dark:border-amber-800"
+                  >
+                    {word}
+                    <button
+                      type="button"
+                      onClick={() => removeAvoidWord(word)}
+                      aria-label={`Remove ${word} from avoid list`}
+                      title={`Stop avoiding "${word}"`}
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </span>
+                ))}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto h-6 px-2 text-xs text-muted-foreground hover:text-foreground"
+                  onClick={clearAvoidWords}
+                >
+                  Clear all
+                </Button>
+              </div>
+            ) : null}
+            {(chatMessages.length > 0 || chatLoading) ? (
+              <div className="mt-3 flex max-h-[360px] flex-col gap-2 overflow-y-auto rounded-lg border border-border bg-background/80 p-3">
+                {chatMessages.map((m, i) => (
+                  <div
+                    key={i}
+                    className={`flex flex-col gap-2 ${
+                      m.role === "user" ? "items-end" : "items-start"
+                    }`}
+                  >
+                    <div
+                      className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
+                        m.role === "user"
+                          ? "bg-primary text-primary-foreground"
+                          : "border border-border bg-background text-foreground"
+                      }`}
+                    >
+                      <span className="whitespace-pre-wrap">{m.content}</span>
+                    </div>
+                    {m.role === "assistant" && m.suggestion ? (
+                      (() => {
+                        const suggestion = m.suggestion;
+                        const deltas = summarizeSuggestion(suggestion);
+                        return (
+                          <div className="flex w-full max-w-[85%] flex-col gap-2 rounded-lg border border-dashed border-border bg-muted/40 p-3">
+                            <p className="text-xs text-muted-foreground">
+                              Suggested next step:{" "}
+                              <span className="text-foreground">{suggestion.label}</span>
+                            </p>
+                            {suggestion.description ? (
+                              <p className="text-xs text-muted-foreground">
+                                <span className="font-medium text-foreground">New prompt:</span>{" "}
+                                {suggestion.description}
+                              </p>
+                            ) : null}
+                            {deltas.length > 0 ? (
+                              <div className="flex flex-wrap gap-1.5">
+                                {deltas.map((delta) => (
+                                  <Badge
+                                    key={`${delta.label}-${delta.value}`}
+                                    variant={delta.label === "Avoid" ? "outline" : "secondary"}
+                                    className={
+                                      delta.label === "Avoid"
+                                        ? "border-amber-300/80 text-amber-900 dark:border-amber-800 dark:text-amber-200"
+                                        : undefined
+                                    }
+                                  >
+                                    <span className="mr-1 text-[10px] uppercase tracking-wider opacity-70">
+                                      {delta.label}
+                                    </span>
+                                    {delta.value}
+                                  </Badge>
+                                ))}
+                              </div>
+                            ) : null}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() =>
+                                  applyChatSuggestion(suggestion, { run: false })
+                                }
+                                disabled={loading}
+                                title="Pre-fill the search form with these settings"
+                              >
+                                Apply
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                onClick={() =>
+                                  applyChatSuggestion(suggestion, { run: true })
+                                }
+                                disabled={loading}
+                                className="gap-1"
+                                title="Pre-fill the form and start a new generation"
+                              >
+                                <Sparkles className="size-3.5" />
+                                Apply &amp; generate
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })()
+                    ) : null}
+                  </div>
+                ))}
+                {chatLoading ? (
+                  <p className="text-sm text-muted-foreground">Thinking...</p>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {meta?.domainLookupError ? (
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm">
+            <p className="font-medium text-destructive">Domain lookup service unavailable</p>
+            <p className="mt-2 text-foreground">{meta.domainLookupError}</p>
+            <p className="mt-2 text-muted-foreground">
+              Suggested names are still listed below, but availability could not be verified—do not rely on
+              these checks until the service responds normally.
+            </p>
+          </div>
+        ) : null}
+
+        {meta &&
+        meta.generatedCount > 0 &&
+        results.length === 0 &&
+        !meta.relaxedTldFilter &&
+        !meta.domainLookupError ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm dark:border-amber-800 dark:bg-amber-950/30">
             <p className="text-foreground">
               We generated and checked <strong>{meta.generatedCount} names</strong>, but {form.requireAllTlds ? <><strong>none had all of your selected TLDs</strong> (e.g. both .com and .ai) available at once.</> : <><strong>none had any of your selected TLDs</strong> available.</>} So there’s nothing to show in the table. Try &quot;Refine Based on Available&quot; after a run that had some availability, or relax criteria (e.g. allow dictionary words, higher temperature) and generate again.
@@ -808,7 +2174,7 @@ export default function Home(): React.JSX.Element {
                               : "Taken";
                             const variant = d.available
                               ? isPremium
-                                ? "secondary"
+                                ? "premium"
                                 : "default"
                               : "outline";
                             return (
@@ -863,13 +2229,23 @@ export default function Home(): React.JSX.Element {
                   <th className="px-4 py-3 font-medium text-foreground">Base</th>
                   <th className="px-4 py-3 font-medium text-foreground">Domains</th>
                   <th className="px-4 py-3 font-medium text-foreground">Rationale</th>
-                  <th className="px-4 py-3 font-medium text-foreground">Score</th>
+                  <th className="px-4 py-3 font-medium text-foreground">
+                    <span className="inline-flex items-center gap-1">
+                      Score
+                      <span
+                        title="Hover a score cell for ranking rationale."
+                        aria-label="Hover a score cell for ranking rationale"
+                      >
+                        <CircleHelp className="size-3.5 text-muted-foreground" aria-hidden />
+                      </span>
+                    </span>
+                  </th>
                   <th className="w-12 px-4 py-3" aria-label="Save" />
                 </tr>
               </thead>
               <tbody>
-                {results.map((candidate) => (
-                  <tr key={candidate.base} className="border-b border-border/60 align-top transition-colors hover:bg-muted/30">
+                {results.map((candidate, idx) => (
+                  <tr key={`${candidate.base}-${idx}`} className="border-b border-border/60 align-top transition-colors hover:bg-muted/30">
                     <td className="px-4 py-3 font-mono text-foreground">{candidate.base}</td>
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-1">
@@ -888,7 +2264,7 @@ export default function Home(): React.JSX.Element {
                               : "Taken";
                           const badgeVariant = isAvailable
                             ? isPremium
-                              ? "secondary"
+                              ? "premium"
                               : "default"
                             : domain.status === "error"
                               ? "secondary"
@@ -911,7 +2287,23 @@ export default function Home(): React.JSX.Element {
                     <td className="px-4 py-3 text-muted-foreground">
                       {candidate.rationale ?? "-"}
                     </td>
-                    <td className="px-4 py-3 text-foreground">{candidate.score}</td>
+                    <td
+                      className="px-4 py-3 text-foreground"
+                      title={scoreTooltip(candidate, form.nameStyle)}
+                    >
+                      <div className="inline-flex items-center gap-1 font-medium">
+                        {candidate.score}
+                        <CircleHelp
+                          className="size-3.5 text-muted-foreground"
+                          aria-hidden
+                        />
+                      </div>
+                      {candidate.scoreBreakdown ? (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {scoreBreakdownLabel(candidate)}
+                        </div>
+                      ) : null}
+                    </td>
                     <td className="px-4 py-3">
                       <Button
                         type="button"
@@ -932,64 +2324,9 @@ export default function Home(): React.JSX.Element {
         </div>
         </CardContent>
       </Card>
-
-      {results.length > 0 ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Ask about these names</CardTitle>
-            <CardDescription>
-            Query the set of {results.length} names (e.g. “Which are shortest?”, “List names with .com or .ai available”, “Group by style”).
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-col gap-2 overflow-y-auto max-h-[320px] rounded-lg border border-border bg-muted/30 p-3">
-              {chatMessages.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No messages yet. Ask a question below.</p>
-              ) : (
-                chatMessages.map((m, i) => (
-                  <div
-                    key={i}
-                    className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
-                  >
-                    <div
-                      className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
-                        m.role === "user"
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-background text-foreground border border-border"
-                      }`}
-                    >
-                      <span className="whitespace-pre-wrap">{m.content}</span>
-                    </div>
-                  </div>
-                ))
-              )}
-              {chatLoading ? (
-                <p className="text-sm text-muted-foreground">Thinking...</p>
-              ) : null}
-            </div>
-            <div className="flex gap-2">
-              <Input
-                type="text"
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendChat()}
-                placeholder="e.g. Which names have .com or .ai available?"
-                disabled={chatLoading}
-                className="flex-1"
-              />
-              <Button
-                type="button"
-                onClick={sendChat}
-                disabled={chatLoading || !chatInput.trim()}
-              >
-                Send
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      ) : null}
+      </div>
         </div>
-    </main>
+      </main>
     </div>
   );
 }

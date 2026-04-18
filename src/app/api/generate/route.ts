@@ -63,6 +63,15 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     const result = await runFullPipeline(body, undefined, logContext);
 
+    if (result.domainLookupFailure) {
+      logWarn("api.generate.domain_lookup_failure", {
+        ...logContext,
+        durationMs: Date.now() - startedAt,
+        generatedCount: result.generatedNames.length,
+      });
+      return NextResponse.json(buildResponse(result, body));
+    }
+
     if (result.names.length > 0) {
       logInfo("api.generate.success", {
         ...logContext,
@@ -103,6 +112,17 @@ export async function POST(request: Request): Promise<NextResponse> {
         ...logContext,
         fallback: strategy.id,
       });
+      if (fallbackResult.domainLookupFailure) {
+        logWarn("api.generate.domain_lookup_failure", {
+          ...logContext,
+          fallback: strategy.id,
+          durationMs: Date.now() - startedAt,
+          generatedCount: fallbackResult.generatedNames.length,
+        });
+        return NextResponse.json(
+          buildResponse(fallbackResult, body, { fallbackUsed: strategy.id }),
+        );
+      }
       if (fallbackResult.names.length > 0) {
         logWarn("api.generate.fallback_success", {
           ...logContext,
@@ -159,6 +179,18 @@ export async function POST(request: Request): Promise<NextResponse> {
         fallback: "lastResort",
         attempt: attempt + 1,
       });
+      if (lastResult.domainLookupFailure) {
+        logWarn("api.generate.domain_lookup_failure", {
+          ...logContext,
+          fallback: "lastResort",
+          attempt: attempt + 1,
+          durationMs: Date.now() - startedAt,
+          generatedCount: lastResult.generatedNames.length,
+        });
+        return NextResponse.json(
+          buildResponse(lastResult, body, { fallbackUsed: "lastResort" }),
+        );
+      }
       if (lastResult.names.length > 0) {
         logWarn("api.generate.last_resort_success", {
           ...logContext,

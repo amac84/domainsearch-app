@@ -1,5 +1,4 @@
 import { DomainrProvider } from "@/lib/domain-marketplace/providers/domainr-provider";
-import { DynadotProvider } from "@/lib/domain-marketplace/providers/dynadot-provider";
 import { GoDaddyGoValueProvider } from "@/lib/domain-marketplace/providers/godaddy-go-value-provider";
 import { SedoProvider } from "@/lib/domain-marketplace/providers/sedo-provider";
 import type { DomainListing, DomainMarketplaceProvider } from "@/lib/domain-marketplace/types";
@@ -44,17 +43,6 @@ function buildProvidersFromEnv(): DomainMarketplaceProvider[] {
     );
   }
 
-  const dynadotApiKey = process.env.DYNADOT_API_KEY?.trim();
-  if (dynadotApiKey) {
-    providers.push(
-      new DynadotProvider({
-        apiKey: dynadotApiKey,
-        useSandbox: process.env.DYNADOT_SANDBOX === "1" || process.env.DYNADOT_SANDBOX === "true",
-        currency: process.env.DYNADOT_CURRENCY ?? "usd",
-      }),
-    );
-  }
-
   const sedoPartnerId = process.env.SEDO_PARTNER_ID?.trim();
   const sedoSignKey = process.env.SEDO_SIGN_KEY?.trim();
   if (sedoPartnerId && sedoSignKey) {
@@ -82,7 +70,7 @@ async function main(): Promise<void> {
 
   if (providers.length === 0) {
     throw new Error(
-      "No providers configured. Add GoDaddy, Dynadot, Sedo, or Domainr credentials in .env before running this script.",
+      "No providers configured. Add GoDaddy, Sedo, or Domainr credentials in .env before running this script.",
     );
   }
 

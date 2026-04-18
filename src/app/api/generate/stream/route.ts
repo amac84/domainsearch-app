@@ -106,6 +106,18 @@ export async function POST(request: Request): Promise<Response> {
           onProgress("Starting…");
           const result = await runFullPipeline(body, onProgress, logContext);
 
+          if (result.domainLookupFailure) {
+            const response = buildResponse(result, body);
+            logWarn("api.generate_stream.domain_lookup_failure", {
+              ...logContext,
+              durationMs: Date.now() - startedAt,
+              generatedCount: result.generatedNames.length,
+            });
+            enqueue(sseMessage({ type: "result", result: response }));
+            closeStream();
+            return;
+          }
+
           if (result.names.length > 0) {
             const response = buildResponse(result, body);
             logInfo("api.generate_stream.success", {
@@ -151,6 +163,20 @@ export async function POST(request: Request): Promise<Response> {
               ...logContext,
               fallback: strategy.id,
             });
+            if (fallbackResult.domainLookupFailure) {
+              const response = buildResponse(fallbackResult, body, {
+                fallbackUsed: strategy.id,
+              });
+              logWarn("api.generate_stream.domain_lookup_failure", {
+                ...logContext,
+                fallback: strategy.id,
+                durationMs: Date.now() - startedAt,
+                generatedCount: fallbackResult.generatedNames.length,
+              });
+              enqueue(sseMessage({ type: "result", result: response }));
+              closeStream();
+              return;
+            }
             if (fallbackResult.names.length > 0) {
               const response = buildResponse(fallbackResult, body, {
                 fallbackUsed: strategy.id,
@@ -210,6 +236,21 @@ export async function POST(request: Request): Promise<Response> {
               onProgress,
               { ...logContext, fallback: "lastResort", attempt: attempt + 1 },
             );
+            if (lastResult.domainLookupFailure) {
+              const response = buildResponse(lastResult, body, {
+                fallbackUsed: "lastResort",
+              });
+              logWarn("api.generate_stream.domain_lookup_failure", {
+                ...logContext,
+                fallback: "lastResort",
+                attempt: attempt + 1,
+                durationMs: Date.now() - startedAt,
+                generatedCount: lastResult.generatedNames.length,
+              });
+              enqueue(sseMessage({ type: "result", result: response }));
+              closeStream();
+              return;
+            }
             if (lastResult.names.length > 0) {
               const response = buildResponse(lastResult, body, {
                 fallbackUsed: "lastResort",
