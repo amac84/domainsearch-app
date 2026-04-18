@@ -580,10 +580,6 @@ export default function Home(): React.JSX.Element {
   const activityLogRef = useRef<HTMLDivElement | null>(null);
   const resultsSectionRef = useRef<HTMLDivElement | null>(null);
 
-  const scrollToResults = useCallback(() => {
-    resultsSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, []);
-
   const persistAuthSnapshot = useCallback(() => {
     if (typeof window === "undefined") return;
     const snapshot: AuthStateSnapshot = {
@@ -1203,6 +1199,12 @@ export default function Home(): React.JSX.Element {
                 setResults(data.result.names);
                 setMeta(data.result.meta);
                 setChatMessages([]);
+                queueMicrotask(() => {
+                  resultsSectionRef.current?.scrollIntoView({
+                    behavior: "smooth",
+                    block: "start",
+                  });
+                });
                 const availableInRun = data.result.names.reduce(
                   (acc, candidate) =>
                     acc + candidate.domains.filter((domain) => domain.available).length,

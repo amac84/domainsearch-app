@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { startTransition, useEffect, useState } from "react";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -36,7 +36,9 @@ export function ThemeToggle() {
   const [theme, setTheme] = useState<Theme>("light");
 
   useEffect(() => {
-    setTheme(getEffectiveTheme());
+    startTransition(() => {
+      setTheme(getEffectiveTheme());
+    });
   }, []);
 
   const toggle = () => {
