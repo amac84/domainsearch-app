@@ -1,23 +1,9 @@
-import OpenAI from "openai";
-
 import { getIndustryGuidance, getCombinedStyleGuidance, getCombinedToneGuidance } from "@/lib/name-generation";
-import type { NameCandidate, NameRecommendation } from "@/types";
+import { getJudgeClient, getJudgeModel } from "@/lib/llm-clients";
+import type { EnrichedBrief, NameCandidate, NameRecommendation } from "@/types";
 import { logError, logWarn } from "@/lib/server-logger";
 
-const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 const DEFAULT_MAX_TO_RANK = 80;
-
-let client: OpenAI | null = null;
-
-function getClient(): OpenAI {
-  if (!process.env.OPENAI_API_KEY?.trim()) {
-    throw new Error("OPENAI_API_KEY is not set.");
-  }
-  if (!client) {
-    client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  }
-  return client;
-}
 
 export interface QualityRankInput {
   description: string;
@@ -28,6 +14,13 @@ export interface QualityRankInput {
   referenceSeoKeywords?: string[];
   names: NameCandidate[];
   maxToRank?: number;
+  /** v2 pipeline: structured brief used to keep judging aligned with generation. */
+  brief?: EnrichedBrief;
+  /**
+   * v2 pipeline: when names are tagged by territory, balance the top
+   * recommendations so no more than `maxPerTerritory` come from one territory.
+   */
+  maxRecommendationsPerTerritory?: number;
 }
 
 export interface QualityRankResult {
@@ -53,10 +46,14 @@ export async function runQualityRanking(
       available: domain.available,
     })),
     heuristicScore: name.score,
+    territory: name.territory,
   }));
 
-  const completion = await getClient().chat.completions.create({
-    model: DEFAULT_MODEL,
+  const brief = input.brief;
+  const model = getJudgeModel();
+  const maxPerTerritory = Math.max(1, input.maxRecommendationsPerTerritory ?? 2);
+  const completion = await getJudgeClient().chat.completions.create({
+    model,
     temperature: 0.3,
     messages: [
       {
@@ -71,6 +68,15 @@ export async function runQualityRanking(
         role: "user",
         content: [
           `Brand description: ${input.description}`,
+          brief ? `Positioning: ${brief.positioning}` : "",
+          brief ? `Primary audience: ${brief.primaryAudience}` : "",
+          brief ? `Emotional north star: ${brief.emotionalNorthStar}` : "",
+          brief && brief.personalityAdjectives.length
+            ? `Personality: ${brief.personalityAdjectives.join(", ")}`
+            : "",
+          brief && brief.antiPositioning.length
+            ? `Anti-positioning (we are NOT these): ${brief.antiPositioning.join(", ")}`
+            : "",
           input.referenceSeoSummary
             ? `Reference SEO summary: ${input.referenceSeoSummary}`
             : "",
@@ -85,7 +91,7 @@ export async function runQualityRanking(
           "1) Rank names by overall quality (brand fit, memorability, pronounceability) and SEO/discoverability fit for this brand context.",
           "2) Provide one concise rationale per ranked name.",
           "3) Provide a short summary conclusion (2-3 sentences).",
-          "4) Provide top recommendations (5-10) with short reasons.",
+          `4) Provide top recommendations (5-10) with short reasons. When names are tagged by territory, balance picks across territories (max ${maxPerTerritory} recommendations per territory).`,
           "",
           `Candidates JSON: ${JSON.stringify(candidatesForPrompt)}`,
         ].join("\n"),
@@ -130,7 +136,7 @@ export async function runQualityRanking(
   const content = completion.choices[0]?.message?.content;
   if (!content) {
     logWarn("quality_ranking.empty_response_content", {
-      model: DEFAULT_MODEL,
+      model,
       candidateCount: candidates.length,
     });
     return null;
@@ -153,7 +159,7 @@ export async function runQualityRanking(
       !Array.isArray(parsed.recommendations)
     ) {
       logWarn("quality_ranking.invalid_response_shape", {
-        model: DEFAULT_MODEL,
+        model,
         candidateCount: candidates.length,
       });
       return null;
@@ -192,7 +198,7 @@ export async function runQualityRanking(
     };
   } catch (error) {
     logError("quality_ranking.parse_failed", error, {
-      model: DEFAULT_MODEL,
+      model,
       candidateCount: candidates.length,
     });
     return null;

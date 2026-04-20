@@ -563,6 +563,7 @@ export default function Home(): React.JSX.Element {
   const [selectedSavedId, setSelectedSavedId] = useState<string | null>(null);
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [mobileTab, setMobileTab] = useState<"form" | "results">("form");
   const [savingStateError, setSavingStateError] = useState<string | null>(null);
   const [suggestionTitle, setSuggestionTitle] = useState("");
   const [suggestionDescription, setSuggestionDescription] = useState("");
@@ -766,6 +767,13 @@ export default function Home(): React.JSX.Element {
       activityLogRef.current.scrollTop = activityLogRef.current.scrollHeight;
     }
   }, [progressLog]);
+
+  // On mobile, switch to results tab automatically when generation finishes
+  useEffect(() => {
+    if (!loading && results.length > 0) {
+      setMobileTab("results");
+    }
+  }, [loading, results.length]);
 
   useEffect(() => {
     if (!loading || !runTiming) {
@@ -1323,9 +1331,9 @@ export default function Home(): React.JSX.Element {
   };
 
   return (
-    <div className="flex min-h-screen w-full bg-background">
+    <div className="flex min-h-screen w-full flex-col bg-background md:flex-row">
       {/* Left nav: saved names + search */}
-      <aside className="flex w-64 shrink-0 flex-col border-r border-border bg-card/50">
+      <aside className="hidden md:flex md:w-64 md:shrink-0 md:flex-col border-r border-border bg-card/50">
         <div className="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur-sm px-4 py-4">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -1541,9 +1549,32 @@ export default function Home(): React.JSX.Element {
         </div>
       </aside>
 
+      {/* Mobile tab bar — visible only on small screens */}
+      <div className="sticky top-0 z-20 flex shrink-0 border-b border-border bg-background md:hidden">
+        <button
+          type="button"
+          onClick={() => setMobileTab("form")}
+          className={`flex flex-1 items-center justify-center gap-1.5 py-3 text-sm font-medium transition-colors ${mobileTab === "form" ? "border-b-2 border-primary text-foreground" : "text-muted-foreground"}`}
+        >
+          Generator
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobileTab("results")}
+          className={`flex flex-1 items-center justify-center gap-1.5 py-3 text-sm font-medium transition-colors ${mobileTab === "results" ? "border-b-2 border-primary text-foreground" : "text-muted-foreground"}`}
+        >
+          Results
+          {results.length > 0 ? (
+            <span className="rounded-full bg-primary/15 px-1.5 py-0.5 text-xs text-primary">
+              {results.length}
+            </span>
+          ) : null}
+        </button>
+      </div>
+
       {/* Form panel */}
-      <div className="flex w-[400px] shrink-0 flex-col border-r border-border overflow-y-auto">
-        <div className="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur-sm px-4 py-3">
+      <div className={`flex-col border-r border-border overflow-y-auto flex-1 md:flex-none md:w-[400px] md:shrink-0 ${mobileTab === "form" ? "flex" : "hidden"} md:flex`}>
+        <div className="sticky top-0 z-10 hidden border-b border-border bg-card/95 backdrop-blur-sm px-4 py-3 md:block">
           <h2 className="font-semibold text-foreground">Name generator</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">Describe your product, get domain-ready brand names.</p>
         </div>
@@ -1968,7 +1999,7 @@ export default function Home(): React.JSX.Element {
       </div>
 
       {/* Results panel */}
-      <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+      <main className={`flex-col min-w-0 flex-1 overflow-y-auto ${mobileTab === "results" ? "flex" : "hidden"} md:flex`}>
         <div className="flex flex-col gap-6 p-6">
       <div ref={resultsSectionRef}>
       <Card>

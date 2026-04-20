@@ -51,6 +51,60 @@ export interface NameCandidate {
   score: number;
   scoreBreakdown?: NameScoreBreakdown;
   rationale?: string;
+  /** v2 pipeline: which territory this name came from. */
+  territory?: string;
+  /** v2 pipeline: one-line weakness note from the critic. */
+  critiqueNotes?: string;
+  /** v2 pipeline: the original base name this was revised from (if any). */
+  revisedFrom?: string;
+  /** v2 pipeline: seven-filter rubric scores from the critic. */
+  filterScores?: SevenFilterScores;
+}
+
+/** v2 pipeline: seven-filter rubric, each scored 1-5 (higher is better). */
+export interface SevenFilterScores {
+  evocative: number;
+  memorable: number;
+  spellable: number;
+  speakable: number;
+  ownable: number;
+  scalable: number;
+  domainViable: number;
+}
+
+/** v2 pipeline: structured creative brief inferred from the user's inputs. */
+export interface EnrichedBrief {
+  positioning: string;
+  primaryAudience: string;
+  secondaryAudience?: string;
+  personalityAdjectives: string[];
+  emotionalNorthStar: string;
+  antiPositioning: string[];
+  territoriesShortlist: string[];
+  avoidWordsInferred: string[];
+  cliches: string[];
+}
+
+/** v2 pipeline: a single creative territory (metaphor lane) the generator works inside. */
+export interface Territory {
+  name: string;
+  premise: string;
+  archetype: string;
+  tone: string;
+  exemplars: string[];
+  soundShapes: string[];
+}
+
+/** v2 pipeline: end-of-run funnel counts so we can prove each stage helps. */
+export interface CandidateFunnel {
+  generated: number;
+  preFilterSurvivors: number;
+  critiqueSurvivors: number;
+  revised: number;
+  domainChecked: number;
+  final: number;
+  durationMs?: number;
+  pipelineVersion?: "v1" | "v2";
 }
 
 export interface NameScoreBreakdown {
@@ -138,6 +192,14 @@ export interface GenerateMeta {
   relaxedTldFilter?: boolean;
   /** Set when the domain availability API failed for every request in a batch (e.g. 503). */
   domainLookupError?: string;
+  /** v2 pipeline: the structured brief we built from the user's inputs. */
+  brief?: EnrichedBrief;
+  /** v2 pipeline: the creative territories we generated names inside. */
+  territories?: Territory[];
+  /** v2 pipeline: end-of-run funnel counts. */
+  funnel?: CandidateFunnel;
+  /** Which pipeline version produced this response. */
+  pipelineVersion?: "v1" | "v2";
 }
 
 export interface SearchHistoryEntry {
@@ -202,4 +264,12 @@ export interface NameGenerationInput {
    * of these, and the pipeline post-filters duplicates as defence in depth.
    */
   avoidBases?: string[];
+  /** v2 pipeline: structured creative brief inferred from the user's inputs. */
+  brief?: EnrichedBrief;
+  /** v2 pipeline: if set, narrows the prompt to a single creative territory. */
+  territory?: Territory;
+  /** v2 pipeline: curated exemplar names to demonstrate the target style. */
+  exemplars?: string[];
+  /** v2 pipeline: curated morpheme roots to seed invented names. */
+  morphemes?: Array<{ morpheme: string; meaning: string }>;
 }

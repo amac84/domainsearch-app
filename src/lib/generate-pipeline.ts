@@ -6,23 +6,39 @@ export const DOMAIN_LOOKUP_UNAVAILABLE_MESSAGE =
   "Either switch to WhoisXML by setting DOMAIN_CHECK_PROVIDER=whoisxml and WHOISXML_API_KEY (see README), " +
   "or fix your HTTP lookup: AGENT_DOMAIN_SERVICE_URL and AGENT_DOMAIN_SERVICE_CHECK_PATH under Project → Settings → Environment Variables for Production (local .env is not used on the live site). " +
   "The default agentdomainservice.com host must be running; if it is paused on Vercel it returns HTTP 503 until you resume it or change provider.";
+import { enrichBrief } from "@/lib/brief-enrichment";
 import {
   buildDomainsForNames,
   normalizeBaseName,
   normalizeBaseNames,
 } from "@/lib/domain-utils";
+import { pickExemplars, pickMorphemes } from "@/lib/exemplars";
+import {
+  areTerritoriesEnabled,
+  getPipelineVersion,
+  isCritiqueEnabled,
+  isTournamentEnabled,
+} from "@/lib/llm-clients";
 import { generateNames } from "@/lib/name-generation";
+import { curateBatch } from "@/lib/name-critic";
+import { applyTournament } from "@/lib/name-tournament";
+import { filterCandidates } from "@/lib/phonetic-filter";
+import { planTerritories } from "@/lib/territory-planner";
+import { createFunnel, type FunnelAccumulator } from "@/lib/pipeline-funnel";
 import { runQualityRanking } from "@/lib/quality-rank";
 import { summarizeReferenceDomain } from "@/lib/reference-site-summary";
 import { rankCandidates } from "@/lib/ranking";
 import { logError, logInfo, logWarn } from "@/lib/server-logger";
 import type {
+  CandidateFunnel,
   DomainResult,
+  EnrichedBrief,
   GenerateRequestBody,
   GenerateResponseBody,
   NameCandidate,
   NameGenerationInput,
   RefinementInputName,
+  Territory,
 } from "@/types";
 
 function clamp(value: number, min: number, max: number): number {
@@ -44,6 +60,7 @@ function toGenerationInput(
     keywords?: string[];
   },
   avoidBases?: string[],
+  brief?: EnrichedBrief,
 ): NameGenerationInput {
   return {
     description: body.description,
@@ -66,6 +83,7 @@ function toGenerationInput(
     refineFrom,
     prioritizePremiumTlds,
     avoidBases,
+    brief,
   };
 }
 
@@ -239,6 +257,14 @@ export interface PipelineResult {
   domainLookupFailure?: boolean;
   summary?: string;
   recommendations?: GenerateResponseBody["meta"]["recommendations"];
+  /** v2 pipeline: the structured brief we built from inputs. */
+  brief?: EnrichedBrief;
+  /** v2 pipeline: the creative territories we generated within. */
+  territories?: Territory[];
+  /** v2 pipeline: funnel telemetry for this run. */
+  funnel?: CandidateFunnel;
+  /** Which pipeline version produced this result. */
+  pipelineVersion?: "v1" | "v2";
 }
 
 type ProgressCallback = (message: string) => void;
@@ -252,11 +278,19 @@ async function runGenerationPipeline(
   } | null,
   onProgress?: ProgressCallback,
   logContext: LogContext = {},
+  options: {
+    brief?: EnrichedBrief;
+    funnel?: FunnelAccumulator;
+    pipelineVersion?: "v1" | "v2";
+    territories?: Territory[];
+  } = {},
 ): Promise<{
   names: NameCandidate[];
   refinementRounds: number;
   domainLookupFailure: boolean;
 }> {
+  const { brief, funnel, territories } = options;
+  const pipelineVersion = options.pipelineVersion ?? "v1";
   const selectedTlds = body.tlds.map((t) => t.toLowerCase().replace(/^\.+/, ""));
   const selectedPremiumTlds = PREMIUM_TLDS.filter((tld) =>
     selectedTlds.includes(tld),
@@ -297,28 +331,231 @@ async function runGenerationPipeline(
     return fresh;
   };
 
-  const firstPassInput = toGenerationInput(
+  const phoneticFilterEnabled = pipelineVersion === "v2";
+  const applyPhoneticFilter = (names: string[], phase: string): string[] => {
+    if (!phoneticFilterEnabled) return names;
+    const outcome = filterCandidates(names, {
+      industry: body.industry,
+      brief,
+      wordTypeConstraint: body.wordTypeConstraint,
+    });
+    logInfo("pipeline.phonetic_filter.applied", {
+      ...logContext,
+      phase,
+      input: names.length,
+      kept: outcome.kept.length,
+      dropped: outcome.dropped.length,
+      droppedByReason: outcome.droppedByReason,
+    });
+    return outcome.kept;
+  };
+
+  const critiqueEnabled = pipelineVersion === "v2" && isCritiqueEnabled();
+  // Metadata from the critique+revise pass and per-territory generation,
+  // keyed by normalized base name so we can attach it to the NameCandidate
+  // objects produced by buildNameCandidates.
+  const critiqueMetaByBase = new Map<
+    string,
+    {
+      filterScores?: import("@/types").SevenFilterScores;
+      critiqueNotes?: string;
+      revisedFrom?: string;
+      territory?: string;
+    }
+  >();
+
+  const applyCritique = async (
+    names: string[],
+    phase: string,
+  ): Promise<string[]> => {
+    if (!critiqueEnabled || names.length === 0) return names;
+    onProgress?.("Critiquing names…");
+    const curation = await curateBatch({
+      names,
+      brief,
+      description: body.description,
+      industry: body.industry,
+      maxLength,
+      survivorFraction: 0.4,
+      minSurvivors: Math.min(40, names.length),
+      maxToRevise: Math.min(25, names.length),
+    });
+    if (curation.scoredCount === 0) {
+      logWarn("pipeline.critique.empty", { ...logContext, phase, input: names.length });
+      return names;
+    }
+    const survivorNames: string[] = [];
+    for (const survivor of curation.survivors) {
+      const normalized = normalizeBaseName(survivor.base, maxLength);
+      if (!normalized) continue;
+      critiqueMetaByBase.set(normalized, {
+        filterScores: survivor.scores,
+        critiqueNotes: survivor.weakness || undefined,
+      });
+      survivorNames.push(survivor.base);
+    }
+    if (curation.revisedNames.length > 0) {
+      onProgress?.("Revising weak names…");
+    }
+    const revisedNamesRaw: string[] = [];
+    for (const revised of curation.revisedNames) {
+      const normalized = normalizeBaseName(revised.base, maxLength);
+      if (!normalized) continue;
+      if (attemptedBases.has(normalized)) continue;
+      attemptedBases.add(normalized);
+      critiqueMetaByBase.set(normalized, {
+        critiqueNotes: revised.rationale || undefined,
+        revisedFrom: revised.revisedFrom,
+      });
+      revisedNamesRaw.push(revised.base);
+    }
+    const revisedFiltered = applyPhoneticFilter(revisedNamesRaw, `${phase}_revised`);
+    funnel?.recordCritiqueSurvivors(survivorNames.length);
+    funnel?.recordRevised(revisedFiltered.length);
+    logInfo("pipeline.critique.applied", {
+      ...logContext,
+      phase,
+      scored: curation.scoredCount,
+      survivors: survivorNames.length,
+      revisions: curation.revisedNames.length,
+      revisedSurvived: revisedFiltered.length,
+    });
+    return [...survivorNames, ...revisedFiltered];
+  };
+
+  const attachCritiqueMetadata = (
+    candidates: NameCandidate[],
+  ): NameCandidate[] => {
+    if (critiqueMetaByBase.size === 0) return candidates;
+    return candidates.map((candidate) => {
+      const meta = critiqueMetaByBase.get(candidate.base);
+      if (!meta) return candidate;
+      return {
+        ...candidate,
+        filterScores: meta.filterScores ?? candidate.filterScores,
+        critiqueNotes: meta.critiqueNotes ?? candidate.critiqueNotes,
+        revisedFrom: meta.revisedFrom ?? candidate.revisedFrom,
+        territory: meta.territory ?? candidate.territory,
+      };
+    });
+  };
+
+  const baseFirstPassInput = toGenerationInput(
     body,
     body.refineFrom?.namesWithAvailability,
     undefined,
     referenceSeoContext ?? undefined,
     body.refineFrom ? Array.from(attemptedBases) : undefined,
+    brief,
   );
-  onProgress?.("Generating first batch of names…");
-  logInfo("pipeline.first_pass.start", {
-    ...logContext,
-    requestedCount: firstPassInput.count,
-    temperature: firstPassInput.temperature,
-  });
-  const firstPassRaw = await generateNames(firstPassInput);
-  const firstPassNames = filterAndRecord(firstPassRaw);
+
+  const useTerritories =
+    pipelineVersion === "v2" &&
+    Array.isArray(territories) &&
+    territories.length >= 3 &&
+    !body.refineFrom;
+
+  let firstPassRaw: string[] = [];
+
+  if (useTerritories && territories) {
+    const perTerritoryCount = Math.max(
+      15,
+      Math.min(Math.ceil(baseFirstPassInput.count / territories.length), 30),
+    );
+    onProgress?.(`Generating across ${territories.length} creative territories…`);
+    logInfo("pipeline.first_pass.territory_mode.start", {
+      ...logContext,
+      territoryCount: territories.length,
+      perTerritoryCount,
+      temperature: baseFirstPassInput.temperature,
+    });
+    const settled = await Promise.allSettled(
+      territories.map(async (territory) => {
+        onProgress?.(`Generating in territory: ${territory.name}…`);
+        const exemplars = [
+          ...(territory.exemplars ?? []),
+          ...pickExemplars(territory.archetype || body.nameStyle, territory.tone || body.tone, 6),
+        ];
+        const morphemes = pickMorphemes({
+          brief,
+          tone: territory.tone || body.tone,
+          count: 8,
+        });
+        const result = await generateNames({
+          ...baseFirstPassInput,
+          territory,
+          exemplars,
+          morphemes,
+          count: perTerritoryCount,
+        });
+        return { territory, names: result };
+      }),
+    );
+    const tallied: string[] = [];
+    let successful = 0;
+    for (const outcome of settled) {
+      if (outcome.status === "fulfilled") {
+        successful += 1;
+        const { territory, names } = outcome.value;
+        for (const name of names) {
+          const normalized = normalizeBaseName(name, maxLength);
+          if (!normalized) continue;
+          // First territory to claim a base wins the tag.
+          if (!critiqueMetaByBase.has(normalized)) {
+            critiqueMetaByBase.set(normalized, { territory: territory.name });
+          }
+          tallied.push(name);
+        }
+      } else {
+        logWarn("pipeline.first_pass.territory_failed", {
+          ...logContext,
+          reason: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason),
+        });
+      }
+    }
+    if (successful < 3) {
+      // Fallback: not enough territories succeeded. Fall back to the single
+      // big prompt so the user still gets names.
+      logWarn("pipeline.first_pass.territory_fallback", {
+        ...logContext,
+        successful,
+      });
+      const fallback = await generateNames(baseFirstPassInput);
+      firstPassRaw = [...tallied, ...fallback];
+    } else {
+      firstPassRaw = tallied;
+    }
+    logInfo("pipeline.first_pass.territory_mode.complete", {
+      ...logContext,
+      successfulTerritories: successful,
+      totalNames: firstPassRaw.length,
+    });
+  } else {
+    onProgress?.("Generating first batch of names…");
+    logInfo("pipeline.first_pass.start", {
+      ...logContext,
+      requestedCount: baseFirstPassInput.count,
+      temperature: baseFirstPassInput.temperature,
+    });
+    firstPassRaw = await generateNames(baseFirstPassInput);
+  }
+
+  const firstPassDeduped = filterAndRecord(firstPassRaw);
+  funnel?.recordGenerated(firstPassDeduped.length);
+  const firstPassFiltered = applyPhoneticFilter(firstPassDeduped, "first_pass");
+  funnel?.recordPreFilterSurvivors(firstPassFiltered.length);
+  const firstPassNames = await applyCritique(firstPassFiltered, "first_pass");
   logInfo("pipeline.first_pass.generated", {
     ...logContext,
     generatedCount: firstPassNames.length,
-    duplicatesDropped: firstPassRaw.length - firstPassNames.length,
+    duplicatesDropped: firstPassRaw.length - firstPassDeduped.length,
+    phoneticFilterDropped: firstPassDeduped.length - firstPassFiltered.length,
+    afterCritique: firstPassNames.length,
+    territoryMode: useTerritories,
   });
   onProgress?.(`Generated ${firstPassNames.length} names. Checking domain availability…`);
   const firstPass = await buildNameCandidates(firstPassNames, body);
+  funnel?.recordDomainChecked(firstPassNames.length);
   let ranked = firstPass.candidates;
   if (firstPass.lookupServiceUnavailable) {
     logWarn("pipeline.domain_lookup_unavailable.abort", {
@@ -327,7 +564,11 @@ async function runGenerationPipeline(
       candidateCount: ranked.length,
     });
     onProgress?.("Domain lookup service unavailable — stopping. Check your domain API URL or try again later.");
-    return { names: ranked, refinementRounds: 0, domainLookupFailure: true };
+    return {
+      names: attachCritiqueMetadata(ranked),
+      refinementRounds: 0,
+      domainLookupFailure: true,
+    };
   }
   logInfo("pipeline.first_pass.rank_complete", {
     ...logContext,
@@ -361,20 +602,28 @@ async function runGenerationPipeline(
         selectedPremiumTlds,
         referenceSeoContext ?? undefined,
         Array.from(attemptedBases),
+        brief,
       ),
       temperature: 0.95,
-      count: Math.min(firstPassInput.count, 80),
+      count: Math.min(baseFirstPassInput.count, 80),
     };
     const secondPassRaw = await generateNames(secondPassInput);
-    const secondPassNames = filterAndRecord(secondPassRaw);
+    const secondPassDeduped = filterAndRecord(secondPassRaw);
+    funnel?.recordGenerated(secondPassDeduped.length);
+    const secondPassFiltered = applyPhoneticFilter(secondPassDeduped, "second_pass");
+    funnel?.recordPreFilterSurvivors(secondPassFiltered.length);
+    const secondPassNames = await applyCritique(secondPassFiltered, "second_pass");
     logInfo("pipeline.second_pass.generated", {
       ...logContext,
       generatedCount: secondPassNames.length,
-      duplicatesDropped: secondPassRaw.length - secondPassNames.length,
+      duplicatesDropped: secondPassRaw.length - secondPassDeduped.length,
+      phoneticFilterDropped: secondPassDeduped.length - secondPassFiltered.length,
+      afterCritique: secondPassNames.length,
       temperature: secondPassInput.temperature,
     });
     onProgress?.("Checking availability for second batch…");
     const secondPass = await buildNameCandidates(secondPassNames, body);
+    funnel?.recordDomainChecked(secondPassNames.length);
     if (secondPass.lookupServiceUnavailable) {
       ranked = rankCandidates([...ranked, ...secondPass.candidates], {
         selectedTlds: body.tlds,
@@ -386,7 +635,11 @@ async function runGenerationPipeline(
         candidateCount: ranked.length,
       });
       onProgress?.("Domain lookup service unavailable — stopping. Check your domain API URL or try again later.");
-      return { names: ranked, refinementRounds: 1, domainLookupFailure: true };
+      return {
+        names: attachCritiqueMetadata(ranked),
+        refinementRounds: 1,
+        domainLookupFailure: true,
+      };
     }
     ranked = rankCandidates([...ranked, ...secondPass.candidates], {
       selectedTlds: body.tlds,
@@ -426,22 +679,30 @@ async function runGenerationPipeline(
         selectedPremiumTlds,
         referenceSeoContext ?? undefined,
         Array.from(attemptedBases),
+        brief,
       ),
-      count: Math.min(firstPassInput.count, 60),
+      count: Math.min(baseFirstPassInput.count, 60),
       temperature: 0.85,
     };
     const nextRaw = await generateNames(nextInput);
-    const nextNames = filterAndRecord(nextRaw);
+    const nextDeduped = filterAndRecord(nextRaw);
+    funnel?.recordGenerated(nextDeduped.length);
+    const nextFiltered = applyPhoneticFilter(nextDeduped, `refinement_${round + 1}`);
+    funnel?.recordPreFilterSurvivors(nextFiltered.length);
+    const nextNames = await applyCritique(nextFiltered, `refinement_${round + 1}`);
     logInfo("pipeline.refinement.generated", {
       ...logContext,
       round: round + 1,
       generatedCount: nextNames.length,
-      duplicatesDropped: nextRaw.length - nextNames.length,
+      duplicatesDropped: nextRaw.length - nextDeduped.length,
+      phoneticFilterDropped: nextDeduped.length - nextFiltered.length,
+      afterCritique: nextNames.length,
       selectedTlds,
       requireAllTlds,
     });
     onProgress?.("Checking availability for refinement batch…");
     const nextPass = await buildNameCandidates(nextNames, body);
+    funnel?.recordDomainChecked(nextNames.length);
     if (nextPass.lookupServiceUnavailable) {
       ranked = rankCandidates([...ranked, ...nextPass.candidates], {
         selectedTlds: body.tlds,
@@ -455,7 +716,11 @@ async function runGenerationPipeline(
       });
       onProgress?.("Domain lookup service unavailable — stopping. Check your domain API URL or try again later.");
       refinementRounds = round + 1;
-      return { names: ranked, refinementRounds, domainLookupFailure: true };
+      return {
+        names: attachCritiqueMetadata(ranked),
+        refinementRounds,
+        domainLookupFailure: true,
+      };
     }
     ranked = rankCandidates([...ranked, ...nextPass.candidates], {
       selectedTlds: body.tlds,
@@ -472,7 +737,11 @@ async function runGenerationPipeline(
   }
   refinementRounds = round;
 
-  return { names: ranked, refinementRounds, domainLookupFailure: false };
+  return {
+    names: attachCritiqueMetadata(ranked),
+    refinementRounds,
+    domainLookupFailure: false,
+  };
 }
 
 export async function runFullPipeline(
@@ -480,9 +749,13 @@ export async function runFullPipeline(
   onProgress?: ProgressCallback,
   logContext: LogContext = {},
 ): Promise<PipelineResult> {
+  const pipelineVersion = getPipelineVersion();
+  const funnel = createFunnel(pipelineVersion);
+  funnel.markStart();
   const selectedTlds = body.tlds.map((t) => t.toLowerCase().replace(/^\.+/, ""));
   logInfo("pipeline.run.start", {
     ...logContext,
+    pipelineVersion,
     selectedTlds,
     requireAllTlds: Boolean(body.requireAllTlds),
     requestedCount: body.count ?? 100,
@@ -517,8 +790,65 @@ export async function runFullPipeline(
     }
   }
 
+  let brief: EnrichedBrief | undefined;
+  if (pipelineVersion === "v2") {
+    onProgress?.("Building creative brief…");
+    try {
+      const enriched = await enrichBrief({
+        body,
+        referenceSeoSummary: referenceSeoContext?.summary,
+        referenceSeoKeywords: referenceSeoContext?.keywords,
+      });
+      if (enriched) {
+        brief = enriched;
+        logInfo("pipeline.brief.ready", {
+          ...logContext,
+          positioning: brief.positioning.slice(0, 120),
+          territories: brief.territoriesShortlist,
+          personality: brief.personalityAdjectives,
+        });
+      } else {
+        logWarn("pipeline.brief.unavailable", { ...logContext });
+      }
+    } catch (error) {
+      logError("pipeline.brief.failed", error, { ...logContext });
+    }
+  }
+
+  let territories: Territory[] | undefined;
+  if (pipelineVersion === "v2" && brief && areTerritoriesEnabled() && !body.refineFrom) {
+    onProgress?.("Planning creative territories…");
+    try {
+      const planned = await planTerritories({
+        body,
+        brief,
+        referenceSeoSummary: referenceSeoContext?.summary,
+      });
+      if (planned.length >= 3) {
+        territories = planned;
+        logInfo("pipeline.territories.ready", {
+          ...logContext,
+          territoryCount: planned.length,
+          names: planned.map((t) => t.name),
+        });
+      } else {
+        logWarn("pipeline.territories.insufficient", {
+          ...logContext,
+          planned: planned.length,
+        });
+      }
+    } catch (error) {
+      logError("pipeline.territories.failed", error, { ...logContext });
+    }
+  }
+
   const { names: generatedNames, refinementRounds, domainLookupFailure } =
-    await runGenerationPipeline(body, referenceSeoContext, onProgress, logContext);
+    await runGenerationPipeline(body, referenceSeoContext, onProgress, logContext, {
+      brief,
+      funnel,
+      pipelineVersion,
+      territories,
+    });
   const checkedDomains = generatedNames.reduce(
     (acc, value) => acc + value.domains.length,
     0,
@@ -533,6 +863,8 @@ export async function runFullPipeline(
       generatedCount: generatedNames.length,
       checkedDomains,
     });
+    funnel.recordFinal(generatedNames.length);
+    funnel.markEnd();
     return {
       generatedNames,
       names: generatedNames,
@@ -543,6 +875,10 @@ export async function runFullPipeline(
       aiAvailableCount,
       premiumAvailableCount,
       domainLookupFailure: true,
+      brief,
+      territories,
+      funnel: funnel.snapshot(),
+      pipelineVersion,
     };
   }
 
@@ -560,6 +896,8 @@ export async function runFullPipeline(
       referenceSeoSummary: referenceSeoContext?.summary,
       referenceSeoKeywords: referenceSeoContext?.keywords,
       names: generatedNames,
+      brief,
+      maxRecommendationsPerTerritory: pipelineVersion === "v2" ? 2 : undefined,
     });
 
     if (quality) {
@@ -583,6 +921,37 @@ export async function runFullPipeline(
     }
   }
 
+  if (pipelineVersion === "v2" && isTournamentEnabled() && names.length >= 6) {
+    onProgress?.("Running pairwise tournament on top names…");
+    try {
+      const tournament = await applyTournament({
+        candidates: names,
+        brief,
+        description: body.description,
+        industry: body.industry,
+        topN: 30,
+        rewriteTopN: 10,
+        rounds: 3,
+      });
+      names = tournament.candidates;
+      // Fold tournament reasons into recommendations (preserving existing reasons).
+      if (recommendations?.length) {
+        recommendations = recommendations.map((rec) => {
+          const tournamentReason = tournament.reasons[rec.base];
+          if (!tournamentReason) return rec;
+          return { ...rec, reason: tournamentReason };
+        });
+      }
+      logInfo("pipeline.tournament.applied", {
+        ...logContext,
+        rewriteTopN: 10,
+        reasonCount: Object.keys(tournament.reasons).length,
+      });
+    } catch (error) {
+      logError("pipeline.tournament.failed", error, { ...logContext });
+    }
+  }
+
   onProgress?.("Filtering by selected TLDs…");
   const namesBeforeTldFilter = names;
   const requireAllTlds = Boolean(body.requireAllTlds);
@@ -594,8 +963,13 @@ export async function runFullPipeline(
     recommendations = recommendations.filter((rec) => allowedBases.has(rec.base));
   }
 
+  funnel.recordFinal(names.length);
+  funnel.markEnd();
+  const funnelSnapshot = funnel.snapshot();
+
   logInfo("pipeline.run.complete", {
     ...logContext,
+    pipelineVersion,
     generatedCount: generatedNames.length,
     resultCount: names.length,
     checkedDomains,
@@ -604,6 +978,11 @@ export async function runFullPipeline(
     premiumAvailableCount,
     refinementRounds,
     requireAllTlds,
+  });
+  logInfo("pipeline.funnel.summary", {
+    ...logContext,
+    pipelineVersion,
+    ...funnelSnapshot,
   });
 
   return {
@@ -618,6 +997,10 @@ export async function runFullPipeline(
     domainLookupFailure: false,
     summary,
     recommendations,
+    brief,
+    territories,
+    funnel: funnelSnapshot,
+    pipelineVersion,
   };
 }
 
@@ -683,6 +1066,10 @@ export function buildResponse(
       refinementRounds: result.refinementRounds,
       summary: result.summary,
       recommendations,
+      brief: result.brief,
+      territories: result.territories,
+      funnel: result.funnel,
+      pipelineVersion: result.pipelineVersion,
       ...metaOverrides,
       ...(result.domainLookupFailure
         ? { domainLookupError: DOMAIN_LOOKUP_UNAVAILABLE_MESSAGE }

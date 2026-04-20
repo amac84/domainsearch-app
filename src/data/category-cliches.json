@@ -1,0 +1,23 @@
+{
+  "default": ["solutions", "platform", "hub", "ly", "ify", "io", "app", "tech", "labs"],
+  "fintech": ["coin", "pay", "bank", "finance", "money", "wallet", "cash", "credit", "invest", "capital", "fund", "trade", "fin"],
+  "finance": ["coin", "pay", "bank", "finance", "money", "wallet", "cash", "credit", "invest", "capital", "fund", "trade"],
+  "healthcare": ["med", "medi", "health", "care", "clinic", "doc", "rx", "pharm", "bio", "wellness", "vital"],
+  "health": ["med", "medi", "health", "care", "clinic", "doc", "rx", "pharm", "bio", "wellness", "vital"],
+  "saas": ["saas", "cloud", "stack", "app", "sync", "flow", "base", "works", "works"],
+  "software": ["soft", "ware", "code", "stack", "app", "base"],
+  "enterprise": ["enterprise", "corp", "systems", "solutions", "pro"],
+  "b2b": ["solutions", "systems", "pro", "works"],
+  "consumer": ["daily", "easy", "simple", "quick"],
+  "ecommerce": ["shop", "store", "cart", "market", "buy", "mart", "mall"],
+  "edtech": ["learn", "edu", "class", "teach", "smart", "prep"],
+  "education": ["learn", "edu", "class", "teach", "prep"],
+  "legal": ["legal", "law", "counsel", "case"],
+  "consulting": ["consult", "advise", "advisory", "partners"],
+  "agency": ["agency", "studio", "creative", "works"],
+  "nonprofit": ["care", "impact", "give", "fund", "aid"],
+  "ai": ["ai", "gpt", "neuro", "cog", "brain", "mind", "bot", "intel", "smart", "genius", "think", "prompt"],
+  "crypto": ["coin", "chain", "token", "block", "crypto", "defi", "dao", "nft", "web3", "meta"],
+  "web3": ["chain", "token", "block", "crypto", "defi", "dao", "nft", "web3", "meta"],
+  "realestate": ["home", "house", "real", "estate", "realty", "property", "rent"]
+}

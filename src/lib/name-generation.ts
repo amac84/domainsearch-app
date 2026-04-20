@@ -1,27 +1,7 @@
-import OpenAI from "openai";
-
 import type { NameGenerationInput } from "@/types";
+import { formatBriefForPrompt } from "@/lib/brief-enrichment";
+import { getCreativeClient, getCreativeModel } from "@/lib/llm-clients";
 import { logError, logWarn } from "@/lib/server-logger";
-
-const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
-
-let client: OpenAI | null = null;
-
-function getClient(): OpenAI {
-  if (!process.env.OPENAI_API_KEY?.trim()) {
-    throw new Error(
-      "OPENAI_API_KEY is not set. Add OPENAI_API_KEY=sk-... to .env in the domainsearch-app folder (no quotes, no spaces around =), then restart the dev server.",
-    );
-  }
-
-  if (!client) {
-    client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-  }
-
-  return client;
-}
 
 /** System prompt aligned with `lunour-naming.skill` (Lunour naming framework) at repo root. */
 function buildSystemPrompt(): string {
@@ -293,12 +273,65 @@ function buildUserPrompt(input: NameGenerationInput): string {
         ? "- Use real recognizable English dictionary words only (no coined or made-up words)"
         : "- Mixed words allowed (invented and dictionary-inspired are both acceptable)";
 
+  const territory = input.territory;
+  const brief = input.brief;
+  const exemplars = input.exemplars?.filter(Boolean).slice(0, 10) ?? [];
+  const morphemes = input.morphemes?.filter((m) => m?.morpheme && m?.meaning).slice(0, 12) ?? [];
+  const avoidWordsFromBrief = brief?.avoidWordsInferred?.slice(0, 20) ?? [];
+  const clichesFromBrief = brief?.cliches?.slice(0, 20) ?? [];
+
+  const briefBlock = brief
+    ? formatBriefForPrompt(brief)
+    : "Discovery (internalize before you generate; output is names only): infer what the company does, who the primary customer is, the core feeling they want, and 2-3 personality adjectives from the brief. If the brief is thin, choose versatile, credible names and still diversify archetypes.";
+
+  const territoryBlock = territory
+    ? [
+        "",
+        "Creative territory (every name you produce MUST sit inside this one lane):",
+        `- Territory name: ${territory.name}`,
+        `- Premise: ${territory.premise}`,
+        `- Archetype: ${territory.archetype}`,
+        `- Tone: ${territory.tone}`,
+        territory.soundShapes.length
+          ? `- Sound shapes to favor: ${territory.soundShapes.join(", ")}`
+          : "",
+        territory.exemplars.length
+          ? `- Reference exemplars (do not copy; draw on their spirit): ${territory.exemplars.join(", ")}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "";
+
+  const exemplarsBlock = exemplars.length
+    ? [
+        "",
+        "Style exemplars (real brands that hit this archetype+tone; borrow the feeling, do not copy):",
+        exemplars.join(", "),
+      ].join("\n")
+    : "";
+
+  const morphemesBlock = morphemes.length
+    ? [
+        "",
+        "Morpheme seed material (roots you may combine, transform, invert, or ignore):",
+        morphemes.map((m) => `${m.morpheme} (${m.meaning})`).join("; "),
+      ].join("\n")
+    : "";
+
+  // When we are inside a specific territory, do NOT ask the model to diversify
+  // across archetypes - diversity now comes from running multiple territories
+  // in parallel. Otherwise keep the original spread instruction.
+  const diversityInstruction = territory
+    ? "- Stay strictly inside the territory above; variety comes from exploring different angles WITHIN the territory."
+    : "- Spread the batch across distinct naming archetypes (evocative, invented/coined, metaphor, place/atmosphere, portmanteau, experiential, designed-sound). Do not let one archetype dominate.";
+
   return [
     "Brand context (names should align with this):",
-    "Discovery (internalize before you generate; output is names only): infer what the company does, who the primary customer is, the core feeling they want, and 2–3 personality adjectives from the brief. If the brief is thin, choose versatile, credible names and still diversify archetypes.",
+    briefBlock,
     input.description.trim()
-      ? input.description
-      : "General startup or product—versatile, credible names.",
+      ? `Raw description: ${input.description}`
+      : "General startup or product - versatile, credible names.",
     input.referenceDomain
       ? `Reference domain (style inspiration only; do not copy): ${input.referenceDomain}`
       : "",
@@ -316,13 +349,16 @@ function buildUserPrompt(input: NameGenerationInput): string {
     (() => {
       const tones = normalizeToArray(input.tone);
       const styles = normalizeToArray(input.nameStyle);
-      const toneLabel = tones.length > 0 ? tones.join(", ") : "trust";
-      const styleLabel = styles.length > 0 ? styles.join(", ") : "evocative";
+      const toneLabelValue = tones.length > 0 ? tones.join(", ") : "trust";
+      const styleLabelValue = styles.length > 0 ? styles.join(", ") : "evocative";
       return [
-        `Feeling(s) on first hearing: ${toneLabel}. ${getCombinedToneGuidance(input.tone)}`,
-        `Lunour archetype(s) to weight: ${styleLabel}. ${getCombinedStyleGuidance(input.nameStyle)}`,
+        `Feeling(s) on first hearing: ${toneLabelValue}. ${getCombinedToneGuidance(input.tone)}`,
+        `Lunour archetype(s) to weight: ${styleLabelValue}. ${getCombinedStyleGuidance(input.nameStyle)}`,
       ].join("\n");
     })(),
+    territoryBlock,
+    exemplarsBlock,
+    morphemesBlock,
     "",
     "Constraints:",
     `- Max length: ${input.maxLength}`,
@@ -335,12 +371,18 @@ function buildUserPrompt(input: NameGenerationInput): string {
     avoidWords !== "none"
       ? "- Do not use words that sound very similar to or could be confused with the avoided words above."
       : "",
+    avoidWordsFromBrief.length
+      ? `- Category words/fragments to avoid (from strategic brief): ${avoidWordsFromBrief.join(", ")}.`
+      : "",
+    clichesFromBrief.length
+      ? `- Category cliches to dodge (from strategic brief): ${clichesFromBrief.join(", ")}.`
+      : "",
     `Generate ${input.count} brand names:`,
     "- 5-10 characters where possible",
     syllableInstruction,
     inventedInstruction,
     "- Pronounceable with a single clear stress pattern",
-    "- Spread the batch across distinct naming archetypes (evocative, invented/coined, metaphor, place/atmosphere, portmanteau, experiential, designed-sound). Do not let one archetype dominate.",
+    diversityInstruction,
     "- Vary endings, vowel/consonant shape, and length. Avoid clustering sibling-sounding names (e.g. many ending in -io, -ly, -ify, -ai, -ex).",
     "- Each name must pass the core test: evocative, memorable, spellable on first hearing, and ownable (not a generic category word).",
     "- Prefer names that could plausibly become a verb or noun in everyday use.",
@@ -370,8 +412,9 @@ export async function generateNames(input: NameGenerationInput): Promise<string[
   const safeCount = clamp(input.count, 1, 200);
   const safeTemperature = clamp(input.temperature, 0.3, 1.2);
 
-  const completion = await getClient().chat.completions.create({
-    model: DEFAULT_MODEL,
+  const model = getCreativeModel();
+  const completion = await getCreativeClient().chat.completions.create({
+    model,
     temperature: safeTemperature,
     messages: [
       { role: "system", content: buildSystemPrompt() },
@@ -400,7 +443,7 @@ export async function generateNames(input: NameGenerationInput): Promise<string[
   const content = completion.choices[0]?.message?.content;
   if (!content) {
     logWarn("name_generation.empty_response_content", {
-      model: DEFAULT_MODEL,
+      model,
       requestedCount: safeCount,
       temperature: safeTemperature,
     });
@@ -412,7 +455,7 @@ export async function generateNames(input: NameGenerationInput): Promise<string[
     const names = parsed?.names;
     if (!Array.isArray(names)) {
       logWarn("name_generation.invalid_response_shape", {
-        model: DEFAULT_MODEL,
+        model,
         requestedCount: safeCount,
       });
       return [];
@@ -421,7 +464,7 @@ export async function generateNames(input: NameGenerationInput): Promise<string[
     return names.filter((value): value is string => typeof value === "string");
   } catch (error) {
     logError("name_generation.parse_failed", error, {
-      model: DEFAULT_MODEL,
+      model,
       requestedCount: safeCount,
     });
     return [];
