@@ -24,6 +24,9 @@
 .DS_Store
 *.pem
 
+# local runtime logs (server-logger writes logs/app.log)
+/logs/
+
 # debug
 npm-debug.log*
 yarn-debug.log*
